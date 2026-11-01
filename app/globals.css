@@ -1,0 +1,35 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-paper: #fff8e8;
+  --color-panel: #fffef8;
+  --color-ink: #171717;
+  --color-comic-yellow: #ffd83d;
+  --color-comic-red: #cf302b;
+  --color-comic-blue: #1849a9;
+  --color-muted: #56514a;
+  --font-display: 'Bangers', Impact, sans-serif;
+  --font-body: Arial, Helvetica, sans-serif;
+  --shadow-print: 4px 4px 0 #171717;
+}
+
+:root { color-scheme: light; }
+html { min-height: 100%; background: var(--color-paper); }
+body { min-height: 100vh; color: var(--color-ink); font-family: var(--font-body); font-size: 16px; line-height: 1.5; }
+button, input, textarea, select { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 3px solid var(--color-comic-blue); outline-offset: 3px; }
+::selection { color: var(--color-ink); background: var(--color-comic-yellow); }
+
+@layer components {
+  .comic-panel { border: 3px solid var(--color-ink); background: var(--color-panel); }
+  .comic-button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0.6rem 1rem; border: 2px solid var(--color-ink); background: var(--color-comic-yellow); color: var(--color-ink); font-weight: 700; text-decoration: none; box-shadow: var(--shadow-print); cursor: pointer; }
+  .comic-button:hover { transform: translate(1px, 1px); box-shadow: 3px 3px 0 var(--color-ink); }
+  .comic-button:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--color-ink); }
+  .comic-button:disabled { cursor: not-allowed; opacity: .6; transform: none; }
+  .comic-input { width: 100%; min-height: 44px; padding: 0.65rem 0.75rem; border: 2px solid var(--color-ink); background: var(--color-panel); color: var(--color-ink); }
+  .comic-halftone { background-image: radial-gradient(rgb(23 23 23 / 10%) 1px, transparent 1px); background-size: 7px 7px; }
+  .comic-wordmark { font-family: var(--font-display); color: var(--color-comic-red); -webkit-text-stroke: 1px var(--color-ink); text-shadow: 2px 2px 0 var(--color-comic-yellow), 3px 3px 0 var(--color-ink); line-height: 1; letter-spacing: .025em; }
+}
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
