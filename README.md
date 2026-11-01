@@ -16,6 +16,21 @@ Built for the [DevDay Exchange London Community Hackathon](https://luma.com/dde-
 5. **Revise.** Edit one panel's artwork, or change the story. A preview shows which panels change; earlier panels stay untouched.
 6. **Publish.** Published comics appear on the public shelf and can be read without an account.
 
+## Install with a prompt
+
+Paste this into Codex, Claude Code, or any coding agent and it will connect Comex for you:
+
+```text
+Connect me to Comex, an AI comic creator, over MCP.
+1. Add a Streamable HTTP MCP server named "comex" with URL https://comex-seven.vercel.app/mcp
+   (Codex: `codex mcp add comex --url https://comex-seven.vercel.app/mcp`,
+    Claude Code: `claude mcp add --transport http comex https://comex-seven.vercel.app/mcp`).
+2. Log in with scopes comex:read comex:write comex:generate comex:publish offline_access
+   (Codex: `codex mcp login comex --scopes comex:read,comex:write,comex:generate,comex:publish,offline_access`;
+    Claude Code: run /mcp and authenticate "comex"), and tell me to approve the consent screen in my browser.
+3. List the Comex tools to confirm the connection works, then ask me what comic I want to make.
+```
+
 ## Connect from Codex (MCP)
 
 Comex exposes a Streamable HTTP MCP endpoint, so you can create comics from Codex or ChatGPT:
