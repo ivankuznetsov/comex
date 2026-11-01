@@ -72,7 +72,7 @@ test('browser consent, owner binding and one-connection revocation',async({brows
   const connections=await page.request.get(base+'/api/mcp-auth/comex/connections');
   const firstGrant=(await connections.json()).connections.find((item:{name:string})=>item.name==='First client');
   expect(firstGrant).toBeTruthy();
-  const revoked=await page.request.post(base+'/api/mcp-auth/comex/connections',{data:{id:firstGrant.id}});
+  const revoked=await page.request.post(base+'/api/mcp-auth/comex/connections',{headers:{origin:base},data:{id:firstGrant.id}});
   expect(revoked.ok()).toBe(true);
   const refresh=async(client:string,token:string)=>request.post(base+'/api/mcp-auth/oauth2/token',{form:{grant_type:'refresh_token',client_id:client,refresh_token:token,resource}});
   expect((await refresh(first.client,first.tokens.refresh_token)).ok()).toBe(false);expect((await refresh(second.client,second.tokens.refresh_token)).ok()).toBe(true);
