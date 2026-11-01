@@ -25,6 +25,8 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Run unit and API tests
         run: bun run test
+      - name: Check demo gateway security
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_demo_proxy.py
       - name: Build and typecheck
         run: |
           bun run build

@@ -31,7 +31,7 @@ bun run build
 
 The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; selecting and adding a card starts its reference image. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background and their findings are advisory. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
 
-SQLite and local asset storage are for local development only. Deployment, hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization remain unverified. No production deployment has been made.
+The Vercel demo can route its API through a running local gateway, so its database, images and jobs remain on that machine. This is a temporary demo arrangement, not durable serverless hosting. See [setup](docs/setup.md); hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization are not yet implemented.
 
 ## Credits
 
