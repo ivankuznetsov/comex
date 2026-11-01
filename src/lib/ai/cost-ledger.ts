@@ -37,9 +37,10 @@ export async function beginCost(db:Db,context:CostContext,input:string|URL|Reque
 }
 
 /** Use actual token usage, never image-count assumptions. USD calculated from a rate snapshot. */
-export function priceUsage(endpoint:string|null,model:string|null,value:unknown) {
+export function priceUsage(endpoint:string|null,model:string|null,value:unknown,serviceTier='default') {
   const raw=obj(value),details=obj(raw.input_tokens_details),outDetails=obj(raw.output_tokens_details);
   const usage:Record<string,unknown>={};
+  if(endpoint==='/v1/responses')usage.service_tier=serviceTier;
   for(const key of ['input_tokens','output_tokens','total_tokens'])if(count(raw[key])!==null)usage[key]=raw[key];
   for(const [key,source,keys] of [
     ['input_tokens_details',details,['text_tokens','image_tokens','cached_tokens','cache_write_tokens']],
@@ -51,6 +52,7 @@ export function priceUsage(endpoint:string|null,model:string|null,value:unknown)
   if(raw.total_tokens!==undefined && count(raw.total_tokens)!==input+output)return {...result,state:'invalid_usage'};
   let nanos:bigint;
   if(endpoint==='/v1/responses' && model==='gpt-6.1-terra'){
+    if(serviceTier!=='default')return {...result,state:'unsupported_service_tier'};
     const cached=details.cached_tokens===undefined?0:count(details.cached_tokens);
     if(cached===null || cached>input)return {...result,state:'invalid_usage'};
     if(details.cache_write_tokens!==undefined && details.cache_write_tokens!==0)return {...result,state:'unsupported_cache_write'};
@@ -79,7 +81,7 @@ export function attachCostReceipt(response:Response,db:Db,context:CostContext,me
     const envelope=obj(body),model=identifier(envelope.model)??meta.model;
     // Response snapshots of the requested model use that model's rate card.
     const pricingModel=model?.startsWith('gpt-6.1-terra-') && /^gpt-6\.1-terra-\d{4}-\d{2}-\d{2}$/.test(model)?'gpt-6.1-terra':model;
-    const priced=priceUsage(meta.endpoint,pricingModel,obj(envelope.usage));
+    const priced=priceUsage(meta.endpoint,pricingModel,obj(envelope.usage),identifier(envelope.service_tier)??'default');
     await query(db,`UPDATE provider_costs SET model=$1,request_id=$2,usage_json=$3,cost_usd=$4,pricing_version=$5,rates_json=$6,cost_state=$7,updated_at=$8 WHERE reservation_id=$9 AND cost_state='unconfirmed'`,[model,identifier(response.headers.get('x-request-id'))??identifier(envelope.id),JSON.stringify(priced.usage),priced.costUsd,'openai-2026-11-01',priced.rates?JSON.stringify(priced.rates):null,priced.state,new Date().toISOString(),context.reservationId]);
     recorded=true;
   }});

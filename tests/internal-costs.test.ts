@@ -30,12 +30,13 @@ describe('internal provider costs',()=>{
  });
  test('missing, invalid and unknown usage is not reported as free',()=>{
   for(const usage of [{},{input_tokens:-1,output_tokens:10},{input_tokens:10,output_tokens:10,total_tokens:0},{input_tokens:10,output_tokens:10,input_tokens_details:{cached_tokens:11}}])expect(priceUsage('/v1/responses','gpt-6.1-terra',usage).costUsd).toBeNull();
+  expect(priceUsage('/v1/responses','gpt-6.1-terra',textUsage,'priority').costUsd).toBeNull();
   expect(priceUsage('/v1/responses','other',textUsage).state).toBe('unsupported_model');
   expect(priceUsage('/v1/images/edits','gpt-image-2.5-flare',textUsage).costUsd).toBeNull();
  });
  test('records provider usage and comic ID in SQLite, without prompt/secret data',async()=>{
   const f=fixture((async()=>response()) as NonNullable<AIOptions['fetch']>);
-  try{await f.ai.questions(input);const [r]=f.rows();expect(r.comic_id).toBe('comic-a');expect(r.cost_state).toBe('priced');expect(Number(r.cost_usd)).toBeCloseTo(0.00331,9);expect(r.request_id).toBe('req_123');expect(r.model).toBe('gpt-6.1-terra');expect(JSON.stringify(r)).not.toContain('test-only');expect(JSON.stringify(r)).not.toContain('A trip');expect(JSON.parse(r.usage_json)).toEqual(textUsage);}finally{f.close();}
+  try{await f.ai.questions(input);const [r]=f.rows();expect(r.comic_id).toBe('comic-a');expect(r.cost_state).toBe('priced');expect(Number(r.cost_usd)).toBeCloseTo(0.00331,9);expect(r.request_id).toBe('req_123');expect(r.model).toBe('gpt-6.1-terra');expect(JSON.stringify(r)).not.toContain('test-only');expect(JSON.stringify(r)).not.toContain('A trip');expect(JSON.parse(r.usage_json)).toEqual({...textUsage,service_tier:'default'});}finally{f.close();}
  });
  test('image generation records actual usage even without a response model field',async()=>{
   const usage={input_tokens:100,output_tokens:500,input_tokens_details:{text_tokens:100,image_tokens:0}};

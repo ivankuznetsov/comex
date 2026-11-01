@@ -36,7 +36,7 @@ GPT Image 2.5 Flare/Sunburst direct Images API: $5/M text input, $8/M image inpu
 $30/M image output; no cached-input discount. Text/image input breakdown is required.
 GPT-6.1 Terra standard Responses: $1/M uncached input, $0.05/M cached input,
 $5/M output, including reasoning tokens. Above 272k input tokens: $2/$0.10/$7.50.
-Unknown models, invalid/incomplete counts, cache-write usage without a known TTL,
+Unknown models, non-default service tiers, invalid/incomplete counts, cache-write usage without a known TTL,
 or unrecognized mixed image/text outputs remain unpriced for reconciliation.
 
 ## Deployment and queries
