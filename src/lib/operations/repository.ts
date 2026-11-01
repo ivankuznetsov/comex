@@ -85,13 +85,14 @@ export abstract class BaseOperations<Tx> implements OperationRepository<Tx> {
   requeueIntent(operationId:string){return this.transact((function*():Program<Tx,boolean>{
     const now:number=yield nowEffect;const r:QueryResult=yield query('SELECT * FROM operations WHERE id=? FOR UPDATE',operationId),row=r.rows[0];
     if(!row || !['queued','running'].includes(row.status) || (row.lease_token && Number(row.lease_until)>now))return false;
+    const abandoned:QueryResult=yield query("SELECT 1 FROM operation_checkpoints WHERE operation_id=? AND checkpoint_key='operator/abandoned-unknown-suggestions'",operationId);if(abandoned.rowCount)return false;
     const changed:QueryResult=yield query("UPDATE operation_dispatch_intents SET state='pending',lease_token=NULL,lease_until=NULL,workflow_run_id=NULL WHERE operation_id=? AND state='delivered'",operationId);return changed.rowCount===1;
   })());}
   recoverStalled(limit:number){if(!Number.isSafeInteger(limit)||limit<1)throw new Error('Recovery limit must be positive.');return this.transact((function*():Program<Tx,{requeued:number;unknown:number}>{
     const now:number=yield nowEffect;
     const stale:QueryResult=yield query(`SELECT o.id FROM operations o JOIN operation_dispatch_intents i ON i.operation_id=o.id
       WHERE o.status IN ('queued','running') AND i.state='delivered' AND (i.lease_until IS NULL OR i.lease_until<=?)
-        AND (o.lease_token IS NULL OR o.lease_until<=?) ORDER BY o.created_at,o.id LIMIT ? FOR UPDATE OF o,i SKIP LOCKED`,now,now,limit);
+        AND (o.lease_token IS NULL OR o.lease_until<=?) AND NOT EXISTS (SELECT 1 FROM operation_checkpoints cp WHERE cp.operation_id=o.id AND cp.checkpoint_key='operator/abandoned-unknown-suggestions') ORDER BY o.created_at,o.id LIMIT ? FOR UPDATE OF o,i SKIP LOCKED`,now,now,limit);
     let requeued=0,unknown=0;
     for(const row of stale.rows){
       const running:QueryResult=yield query("SELECT reservation_id FROM operation_steps WHERE operation_id=? AND state='running'",row.id);
@@ -109,6 +110,7 @@ export abstract class BaseOperations<Tx> implements OperationRepository<Tx> {
   claimOperation(operationId:string,leaseMs:number){ms(leaseMs);return this.transact((function*():Program<Tx,WorkerLease|null>{
     const now:number=yield nowEffect,r:QueryResult=yield query('SELECT * FROM operations WHERE id=? FOR UPDATE',operationId),row=r.rows[0];
     if(!row || !['queued','running'].includes(row.status) || (row.lease_token && Number(row.lease_until)>now))return null;
+    const abandoned:QueryResult=yield query("SELECT 1 FROM operation_checkpoints WHERE operation_id=? AND checkpoint_key='operator/abandoned-unknown-suggestions'",operationId);if(abandoned.rowCount)return null;
     const inflight:QueryResult=yield query("SELECT reservation_id FROM operation_steps WHERE operation_id=? AND state='running'",operationId);
     if(inflight.rows.length){
       yield budgetLock;
@@ -211,6 +213,8 @@ export abstract class BaseOperations<Tx> implements OperationRepository<Tx> {
   reconcileUnknown(operationId:string,stepId:string,state:'completed'|'failed',result:Json|null,policy:TransactionPolicy<Tx>,beforeLock?:TransactionPolicy<Tx>){const encoded=canonical(result);return this.transact((function*():Program<Tx,void>{
     if(beforeLock){const prior:QueryResult=yield query('SELECT * FROM operations WHERE id=?',operationId);if(!prior.rows[0])throw new OperationError('invalid_transition','The operation was not found.');yield policyEffect(beforeLock,{phase:'reconcile',operation:operation(prior.rows[0]),stepId});}
     const now:number=yield nowEffect,r:QueryResult=yield query('SELECT * FROM operations WHERE id=? FOR UPDATE',operationId),row=r.rows[0];
+    const abandoned:QueryResult=yield query("SELECT 1 FROM operation_checkpoints WHERE operation_id=? AND checkpoint_key='operator/abandoned-unknown-suggestions'",operationId);
+    if(abandoned.rowCount)throw new OperationError('invalid_transition','An abandoned suggestion cannot be reconciled or requeued.');
     const steps:QueryResult=yield query('SELECT * FROM operation_steps WHERE operation_id=? AND step_id=? FOR UPDATE',operationId,stepId),step=steps.rows[0];
     if(!row||row.status!=='unknown_outcome'||!step||step.state!=='unknown')throw new OperationError('invalid_transition','The step does not have an unknown outcome.');
     if(row.lease_token && Number(row.lease_until)>now)throw new OperationError('invalid_transition','The worker is still recording its unknown outcome.');

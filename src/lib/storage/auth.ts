@@ -16,7 +16,15 @@ export class PostgresAuth {
   private async transferOperations(c:PoolClient,source:string,destination:string):Promise<void> {
     if(source===destination)return;
     const active=await c.query(`SELECT 1 FROM operations o WHERE o.owner=$1 AND (o.status IN ('queued','running','unknown_outcome') OR
-      EXISTS(SELECT 1 FROM operation_steps s LEFT JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND (s.state IN ('running','unknown') OR r.id IS NULL OR r.state IN ('running','unknown')))) LIMIT 1`,[source]);
+      EXISTS(SELECT 1 FROM operation_steps s LEFT JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND (s.state IN ('running','unknown') OR r.id IS NULL OR r.state IN ('running','unknown'))))
+      AND NOT (o.action='suggestCharacters' AND o.status='unknown_outcome' AND o.lease_token IS NULL
+        AND EXISTS(SELECT 1 FROM comics target WHERE target.id=o.target_id AND target.owner=o.owner AND target.import_batch_id IS NULL)
+        AND EXISTS(SELECT 1 FROM operation_checkpoints cp WHERE cp.operation_id=o.id AND cp.checkpoint_key='operator/abandoned-unknown-suggestions'
+          AND cp.value_json::jsonb->>'decision'='continue_without_suggestion' AND cp.value_json::jsonb->>'providerOutcome'='unknown')
+        AND EXISTS(SELECT 1 FROM operation_dispatch_intents d WHERE d.operation_id=o.id AND d.state='delivered' AND (d.lease_token IS NULL OR d.lease_until<=floor(extract(epoch FROM clock_timestamp())*1000)))
+        AND EXISTS(SELECT 1 FROM operation_steps s JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND s.step_id='suggestions' AND s.state='unknown' AND r.state='unknown')
+        AND NOT EXISTS(SELECT 1 FROM operation_steps s WHERE s.operation_id=o.id AND s.step_id<>'suggestions')
+        AND NOT EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.operation_id=o.id)) LIMIT 1`,[source]);
     if(active.rowCount)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
     // Once a target row is locked, authorized starts lock that same row before
     // insertion. Lock the existing terminal rows before changing ownership.
@@ -42,8 +50,8 @@ export class PostgresAuth {
       if((await c.query('SELECT 1 FROM auth_guests WHERE token_hash=$1',[hash(token)])).rowCount)return null;
       const rows=await c.query(`SELECT c.id FROM comics c WHERE c.owner=$1 AND c.import_batch_id IS NULL AND NOT EXISTS(SELECT 1 FROM auth_users u WHERE u.owner=c.owner) AND NOT EXISTS(SELECT 1 FROM auth_guests g WHERE g.owner=c.owner) FOR UPDATE`,[token]);if(!rows.rowCount)return null;
       const active=await c.query(`SELECT 1 FROM comics c WHERE c.owner=$1 AND c.import_batch_id IS NULL AND (
-        EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state='running') OR
-        EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(c.draft->'operations')='object' THEN c.draft->'operations' ELSE '{}'::jsonb END) o WHERE o.value='"running"'::jsonb) OR
+        EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state IN ('running','unknown')) OR
+        EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(c.draft->'operations')='object' THEN c.draft->'operations' ELSE '{}'::jsonb END) o WHERE o.value IN ('"running"'::jsonb,'"unknown"'::jsonb,'"unknown_outcome"'::jsonb)) OR
         EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.draft->'pages')='array' THEN c.draft->'pages' ELSE '[]'::jsonb END) p,jsonb_array_elements(CASE WHEN jsonb_typeof(p->'panels')='array' THEN p->'panels' ELSE '[]'::jsonb END) n WHERE n->>'status'='checking')) LIMIT 1`,[token]);
       if(active.rowCount)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
       const owner=randomBytes(32).toString('hex');
@@ -88,8 +96,8 @@ export class PostgresAuth {
         // Serializes against revision updates and text-operation reservations.
         await c.query('SELECT id FROM comics WHERE owner=$1 AND import_batch_id IS NULL FOR UPDATE',[anonymousOwner]);
         const active=await c.query(`SELECT 1 FROM comics c WHERE c.owner=$1 AND c.import_batch_id IS NULL AND (
-          EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state='running') OR
-          EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(c.draft->'operations')='object' THEN c.draft->'operations' ELSE '{}'::jsonb END) o WHERE o.value='"running"'::jsonb) OR
+          EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state IN ('running','unknown')) OR
+          EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(c.draft->'operations')='object' THEN c.draft->'operations' ELSE '{}'::jsonb END) o WHERE o.value IN ('"running"'::jsonb,'"unknown"'::jsonb,'"unknown_outcome"'::jsonb)) OR
           EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.draft->'pages')='array' THEN c.draft->'pages' ELSE '[]'::jsonb END) p,
             jsonb_array_elements(CASE WHEN jsonb_typeof(p->'panels')='array' THEN p->'panels' ELSE '[]'::jsonb END) n WHERE n->>'status'='checking')
         ) LIMIT 1`,[anonymousOwner]);
