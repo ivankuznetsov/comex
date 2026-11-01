@@ -5,7 +5,7 @@ Turn a story idea into a comic. Pick a style, describe your plot, approve your c
 Built for the [DevDay Exchange London Community Hackathon](https://luma.com/dde-ldn-hack), 1 November 2026.
 
 - **Live app:** https://comex-seven.vercel.app
-- **Demo video (90 s):** https://seyarabata.com/d/fb332aab4222 · [play on GitHub](docs/demo/comex-demo-90s.mp4)
+- **Demo video (90 s):** https://seyarabata.com/d/6323c905120e · [play on GitHub](docs/demo/comex-demo-90s.mp4)
 
 ## What it does
 
