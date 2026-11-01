@@ -2,17 +2,19 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { PublishDialog } from './PublishDialog';
+import {RevisionPreview, type RevisionProposal} from './RevisionPreview';
 import { ComicShell, Eyebrow, Message, button, field, secondaryButton } from './ComicShell';
 import { errorMessage, request } from './api';
 import { styles, type DraftComic, type Panel } from './types';
 
 type DraftResponse = {comic?: DraftComic; questions?: DraftComic['questions']; jobId?: string; notice?: string};
 type EditDecision = {intent:'story' | 'uncertain';reason:string;panelId:string;reviewedVersion:NonNullable<Panel['reviewVersion']>;proposalId?:string;instruction:string};
+type PageJob = {id:string;state:'running'|'completed'|'paused'|'failed'|'unknown';message:string|null};
 const reviewMessages = {
-  pass: 'Automated review completed without findings. Inspect the panel before accepting.',
+  pass: 'Automated review completed without findings.',
   findings: 'Automated review completed and found possible issues. Inspect the panel and findings.',
-  inconclusive: 'Automated review was inconclusive. Inspect the panel before accepting.',
-  failed: 'Automated review could not complete. Inspect the panel before accepting.',
+  inconclusive: 'Automated review was inconclusive.',
+  failed: 'Automated review could not complete.',
 } as const;
 export default function ComicEditor({ id }: { id: string }) {
   const base = `/api/comics/${encodeURIComponent(id)}`;
@@ -33,15 +35,18 @@ export default function ComicEditor({ id }: { id: string }) {
   const [artEdit, setArtEdit] = useState('');
   const [editDecision, setEditDecision] = useState<EditDecision | null>(null);
   const [storyEdit, setStoryEdit] = useState('');
+  const [revisionPreview, setRevisionPreview] = useState<RevisionProposal | null>(null);
   const [showPublish, setShowPublish] = useState(false);
   const [creator, setCreator] = useState('');
   const [publishTitle, setPublishTitle] = useState('');
+  const [pageJob,setPageJob]=useState<PageJob|null>(null);
+  const [pagePoll,setPagePoll]=useState(0);
   const refresh = useCallback(async () => {
     const data = await request<{comic:DraftComic}>(base);
     setComic(data.comic); setPublishTitle(data.comic.publication?.title ?? data.comic.title); setCreator(data.comic.publication?.creator ?? '');
     return data.comic;
   }, [base]);
-  useEffect(() => { let alive = true; request<{comic:DraftComic}>(base).then(data => { if (alive) { setComic(data.comic); setAnswers(data.comic.answers || {}); setPublishTitle(data.comic.publication?.title ?? data.comic.title); setCreator(data.comic.publication?.creator ?? ''); } }).catch(e => { if (alive) setError(errorMessage(e)); }); return () => {alive = false;}; }, [base]);
+  useEffect(() => { let alive = true; request<{comic:DraftComic}>(base).then(data => { if (alive) { setComic(data.comic); setAnswers(data.comic.answers || {}); setPublishTitle(data.comic.publication?.title ?? data.comic.title); setCreator(data.comic.publication?.creator ?? ''); if(data.comic.activePageJob) {const index=data.comic.pages.findIndex(p=>p.id===data.comic.activePageJob!.pageId); if(index>=0) setSelectedPage(index); if(data.comic.activePageJob.state==='running') setBusy('Drawing page');} } }).catch(e => { if (alive) setError(errorMessage(e)); }); return () => {alive = false;}; }, [base]);
   useEffect(() => {
     if (comic?.id !== id || comic.initialQuestions !== 'pending' || initialQuestionRequest.current === id) return;
     initialQuestionRequest.current = id;
@@ -64,6 +69,12 @@ export default function ComicEditor({ id }: { id: string }) {
     const timer=window.setInterval(() => {void refresh().catch(() => {});}, 2500);
     return () => window.clearInterval(timer);
   }, [comic?.initialQuestions, comic?.initialSuggestions, comic?.characters, refresh]);
+  useEffect(() => {
+    if (busy || !(comic?.storyReview?.outcome === 'pending' || comic?.pages.some(page => page.panels.some(panel => panel.status === 'checking')))) return;
+    let active=true;
+    const timer=window.setInterval(() => {void request<{comic:DraftComic}>(base).then(data => {if (active) setComic(data.comic);}).catch(() => {});},2500);
+    return () => {active=false;window.clearInterval(timer);};
+  }, [base,busy,comic?.storyReview?.outcome,comic?.pages]);
   async function action(label: string, path: string, body: unknown = {}, method = 'POST') {
     setBusy(label); setError(''); setNotice('');
     try {
@@ -80,12 +91,14 @@ export default function ComicEditor({ id }: { id: string }) {
   async function reviseStory(panelId: string, instruction = storyEdit, reviewedVersion?:NonNullable<Panel['reviewVersion']>) {
     setBusy('Preparing story revision'); setError(''); setNotice('');
     try {
-      const {proposal} = await request<{proposal:{id:string;affectedPage:number;affectedPanel:number;explanation:string}}>(`${base}/revisions/preview`, {method:'POST',body:JSON.stringify({panelId,instruction,...(reviewedVersion ? {reviewedVersion} : {})})});
-      const confirmed = window.confirm(`This change affects page ${proposal.affectedPage}, panel ${proposal.affectedPanel} onward, including all later pages. Earlier panels stay unchanged.\n\n${proposal.explanation}\n\nApply and regenerate the affected continuation?`);
-      if (confirmed) await action('Revising story','/revisions',{proposalId:proposal.id});
-      else setNotice('Revision not applied.');
+      const {proposal} = await request<{proposal:RevisionProposal}>(`${base}/revisions/preview`, {method:'POST',body:JSON.stringify({panelId,instruction,...(reviewedVersion ? {reviewedVersion} : {})})});
+      setRevisionPreview(proposal);
     } catch (e) { setError(errorMessage(e)); }
     finally { setBusy(''); }
+  }
+  async function applyRevision() {
+    if (!revisionPreview) return;
+    if (await action('Revising story','/revisions',{proposalId:revisionPreview.id})) setRevisionPreview(null);
   }
   async function addCharacter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (addingCharacter.current) return; addingCharacter.current=true; setBusy('Adding character'); setError(''); setNotice('');
@@ -132,11 +145,54 @@ export default function ComicEditor({ id }: { id: string }) {
   const suggestions = (comic?.characterSuggestions || []).filter(suggestion => !characters.some(c => c.name.toLocaleLowerCase('en-US') === suggestion.name.toLocaleLowerCase('en-US')));
   const page = pages[Math.min(selectedPage,Math.max(0,pages.length-1))];
   const panel = page?.panels?.[Math.min(selectedPanel,Math.max(0,page.panels.length-1))];
+  useEffect(() => {
+    if (!page?.id) return;
+    let active=true; let timer:number|undefined;
+    const key=`comex-page-job:${id}:${page.id}`;
+    const saved=window.sessionStorage.getItem(key);
+    async function poll() {
+      try {
+        const suffix=saved ? `?id=${encodeURIComponent(saved)}` : '';
+        let result=await request<{job:PageJob|null;comic:DraftComic}>(`${base}/pages/${encodeURIComponent(page!.id)}/job${suffix}`);
+        if (!result.job && saved) {
+          const latest=await request<{job:PageJob|null;comic:DraftComic}>(`${base}/pages/${encodeURIComponent(page!.id)}/job`);
+          if (latest.job?.state === 'running' || latest.job?.state === 'unknown') result=latest;
+        }
+        if (!active) return;
+        setPageJob(result.job);
+        if (result.job?.state === 'running') {
+          setComic(result.comic); setBusy(current=>current || 'Drawing page');
+          timer=window.setTimeout(poll,2000);
+        } else {
+          setBusy(current=>current === 'Drawing page' ? '' : current);
+          setComic(result.comic); if (result.job?.message) setNotice(result.job.message);
+          if (saved && result.job && result.job.state !== 'unknown') window.sessionStorage.removeItem(key);
+        }
+      } catch {if (active) timer=window.setTimeout(poll,3000);}
+    }
+    setPageJob(null); void poll();
+    return () => {active=false; if(timer) window.clearTimeout(timer);};
+  },[base,id,page?.id,pagePoll]);
+  async function startPage() {
+    if (!page || !comic || busy) return;
+    const key=`comex-page-job:${id}:${page.id}`;
+    const requestId=window.sessionStorage.getItem(key) || crypto.randomUUID();
+    window.sessionStorage.setItem(key,requestId);
+    setBusy('Drawing page');setError('');setNotice('');
+    try {
+      const result=await request<{job:PageJob;comic:DraftComic}>(`${base}/pages/${encodeURIComponent(page.id)}/generate-async`,{method:'POST',body:JSON.stringify({requestId,expectedRevision:comic.revision})});
+      setPageJob(result.job);setComic(result.comic);setPagePoll(value=>value+1);
+    } catch(e) {
+      setError(errorMessage(e));
+      // A lost response may already have started work; poll the same id before permitting another attempt.
+      setPagePoll(value=>value+1);
+    }
+  }
   return <ComicShell><main className="mx-auto max-w-[1200px] px-4 pt-8 sm:px-6">
     <Link href="/" className="font-bold underline decoration-2 underline-offset-4">← Back to comics</Link>
     {!comic ? <div className="mt-8">{error ? <Message error>{error}</Message> : <Message>Opening your draft…</Message>}</div> : <>
       <div className="mb-8 mt-6 flex flex-wrap items-end justify-between gap-5"><div><Eyebrow>Creator’s desk</Eyebrow><h1 className="font-display mt-3 text-4xl font-normal uppercase leading-none sm:text-5xl">{comic.title}</h1><p className="mt-2 text-sm">{styles.find(s => s.id === comic.style)?.name || comic.style} · {comic.published ? 'Published' : 'Private draft'}{comic.unpublishedChanges ? ' · Unpublished changes' : ''}</p></div><div className="flex flex-wrap gap-3">{comic.published && <Link href={`/read/${encodeURIComponent(id)}`} className={secondaryButton}>View published</Link>}<button onClick={() => {setError(''); setShowPublish(true);}} className={button}>{comic.published ? 'Republish' : 'Publish'}</button></div></div>
-      {error && !showPublish && <div className="mb-5"><Message error>{error}</Message></div>}{notice && <div className="mb-5"><Message>{notice}</Message></div>}{busy && <p className="mb-5 border-2 border-[#171717] bg-[#ffd83d] px-4 py-3 font-bold" role="status">{busy}…</p>}
+      {error && !showPublish && !revisionPreview && <div className="mb-5"><Message error>{error}</Message></div>}{notice && <div className="mb-5"><Message>{notice}</Message></div>}{busy && <p className="mb-5 border-2 border-[#171717] bg-[#ffd83d] px-4 py-3 font-bold" role="status">{busy}…</p>}
       <section className="mb-8 border-[3px] border-[#171717] bg-[#fffef8] shadow-[4px_4px_0_#171717]"><div className="border-b-[3px] border-[#171717] bg-[#ffd83d] px-5 py-3"><h2 className="font-display font-normal uppercase">01 / Shape your story</h2></div><div className="p-5"><p className="max-w-3xl whitespace-pre-wrap leading-relaxed">{comic.plot}</p>{(questionsBusy || comic.initialQuestions === 'pending' || comic.initialQuestions === 'running') && <p className="mt-5 font-bold" role="status">Finding questions for your story…</p>}{comic.initialQuestions === 'unknown' && <p className="mt-5 font-bold">The questions request could not be confirmed. Resolve the previous request before trying again.</p>}{!questionsBusy && comic.initialQuestions === 'failed' && <div className="mt-5"><button disabled={!!busy} className={secondaryButton} onClick={() => withSavedAnswers(() => action('Finding questions','/questions'))}>Retry questions</button></div>}{!!comic.questions?.length && comic.initialQuestions !== 'unknown' && <div className="mt-5"><button disabled={!!busy || questionsBusy} className={secondaryButton} onClick={() => withSavedAnswers(() => action('Finding questions','/questions'))}>Refresh questions</button></div>}
       {!!comic.questions?.length && <div className="mt-6 space-y-5">{comic.questions.map(q => <div key={q.id}><label htmlFor={`q-${q.id}`} className="mb-2 block font-bold">{q.question}</label><input id={`q-${q.id}`} value={answers[q.id] || ''} placeholder={q.suggestedAnswer || 'Your answer'} onChange={e => setAnswers({...answers,[q.id]:e.target.value})} className={field} /></div>)}<button className={button} disabled={!!busy} onClick={saveAnswers}>Save answers</button></div>}</div></section>
       <section className="mb-8 border-[3px] border-[#171717] bg-[#fffef8] shadow-[4px_4px_0_#171717]"><div className="border-b-[3px] border-[#171717] bg-[#ffd83d] px-5 py-3"><h2 className="font-display font-normal uppercase">02 / Meet your characters</h2></div><div className="p-5"><p className="max-w-2xl">Review a suggested character or create your own, then approve their reference image before planning pages.</p>
@@ -146,14 +202,15 @@ export default function ComicEditor({ id }: { id: string }) {
       </div></section>
       <section className="border-[3px] border-[#171717] bg-[#fffef8] shadow-[4px_4px_0_#171717]"><div className="border-b-[3px] border-[#171717] bg-[#ffd83d] px-5 py-3"><h2 className="font-display font-normal uppercase">03 / The comic</h2></div><div className="p-5"><div className="flex flex-wrap items-center justify-between gap-4"><p>Plan the beats, then draw each page in order.</p><button disabled={!!busy} className={button} onClick={() => withSavedAnswers(() => action('Planning story','/story/plan'))}>Plan story →</button></div>
         <div className="mt-5 flex flex-wrap gap-5"><div><label htmlFor="panels-per-page" className="mb-1 block font-bold">Panels per page</label><select id="panels-per-page" className={field} disabled={!!busy || !!pages.length} value={comic.panelsPerPage ?? 3} onChange={event => action('Updating panel count','',{panelsPerPage:Number(event.target.value)},'PATCH')}><option value={2}>2 panels</option><option value={3}>3 panels</option><option value={4}>4 panels</option></select><p className="mt-1 text-sm">Choose before planning.</p></div><div><label htmlFor="page-layout" className="mb-1 block font-bold">Page layout</label><select id="page-layout" className={field} disabled={!!busy} value={comic.pageLayout ?? 'stack'} onChange={event => action('Updating page layout','',{pageLayout:event.target.value},'PATCH')}><option value="stack">Vertical stack</option><option value="grid">Two-column grid</option></select><p className="mt-1 text-sm">Applies to downloads and the next published edition.</p></div></div>
-        {comic.storyReview && <div className="mt-5 border-2 border-[#171717] bg-[#fff8e8] p-4"><h3 className="font-bold">Story review: {comic.storyReview.outcome}</h3>{comic.storyReview.findings?.map((finding,i) => <p key={i} className="mt-2 text-sm"><strong>{finding.dimension}:</strong> {finding.observed} {finding.expected && `Expected: ${finding.expected}`}</p>)}{comic.storyReview.accepted && <p className="mt-3 text-sm font-bold">You accepted this story review.</p>}{!comic.storyReview.accepted && comic.storyReview.outcome === 'findings' && comic.storyReview.fingerprint && comic.storyReview.findings.some(finding => finding.severity === 'blocker') && <button disabled={!!busy} className={`${secondaryButton} mt-3`} onClick={() => {if (window.confirm('The automated check flagged a possible story contradiction. Accept this story review and continue anyway?')) action('Accepting story review','/story/accept',{fingerprint:comic.storyReview!.fingerprint});}}>Accept story review and continue</button>}</div>}
+        {comic.storyReview && <div className="mt-5 border-2 border-[#171717] bg-[#fff8e8] p-4"><h3 className="font-bold">Story review: {comic.storyReview.outcome}</h3>{comic.storyReview.findings?.map((finding,i) => <p key={i} className="mt-2 text-sm"><strong>{finding.dimension}:</strong> {finding.observed} {finding.expected && `Expected: ${finding.expected}`}</p>)}</div>}
         {!pages.length ? <div className="mt-5 border-2 border-dashed border-[#171717] bg-[#fff8e8] p-8 text-center"><h3 className="text-xl font-black uppercase">Your pages will appear here.</h3><p className="mt-2">Answer the questions and approve your characters to plan your story.</p></div> : <div className="mt-6 grid gap-5 lg:grid-cols-[110px_minmax(0,1fr)_260px]">
-          <nav aria-label="Comic pages" className="flex gap-2 overflow-auto lg:flex-col">{pages.map((p,i) => <button key={p.id} onClick={() => {setSelectedPage(i);setSelectedPanel(0);}} aria-current={selectedPage===i ? 'page' : undefined} className={`min-h-11 min-w-20 border-2 border-[#171717] px-4 py-3 font-black ${selectedPage===i ? 'bg-[#ffd83d]' : 'bg-white'}`}>Page {p.index}</button>)}</nav>
-          <div><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><strong>PAGE {page?.index} · {page?.status}</strong>{page && <div className="flex flex-wrap gap-3"><button disabled={!!busy} className={secondaryButton} onClick={() => action('Drawing page',`/pages/${encodeURIComponent(page.id)}/generate`)}>{page.panels?.some(p => p.imageUrl) ? 'Regenerate page' : 'Generate page'}</button>{page.panels?.length > 0 && page.panels.every(p => p.imageUrl && (p.evaluation === 'pass' || p.accepted)) && <a className={secondaryButton} href={`${base}/pages/${encodeURIComponent(page.id)}/download`}>Download page</a>}</div>}</div><div className="space-y-3 border-[3px] border-[#171717] bg-white p-3">{page?.panels?.map((p,i) => <button key={p.id} onClick={() => setSelectedPanel(i)} aria-pressed={selectedPanel===i} className={`block min-h-36 w-full border-[3px] text-left ${selectedPanel===i ? 'border-[#ffd83d] outline-2 outline-[#171717]' : 'border-[#171717]'}`}>{p.imageUrl ? <img src={p.imageUrl} alt={`Page ${page.index}, panel ${i+1}`} className="h-auto w-full" /> : <span className="flex min-h-36 items-center justify-center bg-[#f4ead5] p-4 text-center font-bold">{p.description || `Panel ${i+1} — ${p.status || 'not drawn yet'}`}</span>}</button>)}</div>{page?.status === 'outdated' && <p className="mt-3 border-2 border-[#cf302b] p-3 font-bold">Story changed — this page needs updating.</p>}</div>
-          <aside className="border-2 border-[#171717] p-4"><h3 className="border-b-2 border-[#171717] pb-2 text-lg font-black uppercase">Selected panel</h3>{panel ? <><p className="mt-3 text-sm">Panel {selectedPanel+1} · {panel.status || 'planned'}</p>{panel.evaluation && <div className="mt-3 border-2 border-[#171717] bg-[#fff8e8] p-3"><h4 className="font-bold">Check: {panel.status === 'checking' ? 'checking' : panel.evaluation}{panel.accepted ? ' · Accepted' : ''}</h4>{panel.imageUrl && panel.status !== 'checking' && <p className="mt-2 text-sm">{panel.reviewOutcome ? reviewMessages[panel.reviewOutcome] : 'Review result unavailable. Inspect the panel before accepting.'}</p>}{panel.findings?.map((finding,i) => <p key={i} className="mt-2 text-sm"><strong>{finding.dimension}:</strong> {finding.observed} {finding.expected && `Expected: ${finding.expected}`}</p>)}{!panel.accepted && panel.reviewVersion && panel.status === 'needs_review' && (panel.evaluation === 'warning' || panel.evaluation === 'uncertain' || panel.evaluation === 'blocker') && <button disabled={!!busy} className={`${secondaryButton} mt-3 w-full`} onClick={() => {if (panel.evaluation !== 'blocker' || window.confirm('The automated check flagged a possible contradiction. Accept this exact panel and continue anyway?')) action('Accepting panel',`/panels/${encodeURIComponent(panel.id)}/accept`,panel.reviewVersion);}}>Accept and continue</button>}</div>}<label htmlFor="art-edit" className="mb-1 mt-5 block text-sm font-bold">Edit artwork</label><textarea id="art-edit" value={artEdit} onChange={e => {setArtEdit(e.target.value); setEditDecision(null);}} rows={3} className={field} placeholder="Describe a visual change" /><button disabled={!!busy || !artEdit.trim() || !panel.reviewVersion} className={`${secondaryButton} mt-3 w-full`} onClick={() => panel.reviewVersion && editArtwork(panel.id,panel.reviewVersion)}>Regenerate panel</button>{editDecision?.panelId === panel.id && <div className="mt-3 border-2 border-[#171717] bg-[#fff8e8] p-3" role="status"><p className="font-bold">{editDecision.intent === 'story' ? 'This may change the story.' : 'Does this change the story?'}</p><p className="mt-1 text-sm">{editDecision.reason}</p><button disabled={!!busy} className={`${button} mt-3 w-full`} onClick={() => reviseStory(editDecision.panelId,editDecision.instruction,editDecision.reviewedVersion)}>Preview as story change</button>{editDecision.intent === 'uncertain' && <button disabled={!!busy} className={`${secondaryButton} mt-3 w-full`} onClick={() => confirmArtworkChoice(editDecision)}>Artwork only — story stays unchanged</button>}</div>}<label htmlFor="story-edit" className="mb-1 mt-6 block text-sm font-bold">Change the story</label><textarea id="story-edit" value={storyEdit} onChange={e => setStoryEdit(e.target.value)} rows={3} className={field} placeholder="Describe the plot change" /><p className="mt-2 text-sm">Review the affected range before applying the change.</p><button disabled={!!busy || !storyEdit.trim()} className={`${button} mt-3 w-full`} onClick={() => reviseStory(panel.id)}>Preview story change</button></> : <p className="mt-3 text-sm">Select a panel to edit it.</p>}</aside>
+          <nav aria-label="Comic pages" className="flex gap-2 overflow-auto lg:flex-col">{pages.map((p,i) => <button key={p.id} disabled={busy === 'Drawing page'} onClick={() => {setSelectedPage(i);setSelectedPanel(0);}} aria-current={selectedPage===i ? 'page' : undefined} className={`min-h-11 min-w-20 border-2 border-[#171717] px-4 py-3 font-black ${selectedPage===i ? 'bg-[#ffd83d]' : 'bg-white'}`}>Page {p.index}</button>)}</nav>
+          <div><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><strong>PAGE {page?.index} · {page?.status}</strong>{page && <div className="flex flex-wrap gap-3"><button disabled={!!busy || pageJob?.state === 'unknown'} className={secondaryButton} onClick={() => void startPage()}>{page.panels?.some(p => p.imageUrl) ? 'Regenerate page' : 'Generate page'}</button>{page.panels?.length > 0 && page.panels.every(p => p.ready) && <a className={secondaryButton} href={`${base}/pages/${encodeURIComponent(page.id)}/download`}>Download page</a>}</div>}</div>{pageJob?.state === 'running' && <p role="status" className="mb-3 font-bold">Drawing this page; you can return to check progress. If the server restarted, ask an operator to inspect the interrupted job.</p>}{pageJob?.state === 'unknown' && <p role="alert" className="mb-3 font-bold">The previous page request needs operator recovery before retrying.</p>}<div className="space-y-3 border-[3px] border-[#171717] bg-white p-3">{page?.panels?.map((p,i) => <button key={p.id} onClick={() => setSelectedPanel(i)} aria-pressed={selectedPanel===i} className={`block min-h-36 w-full border-[3px] text-left ${selectedPanel===i ? 'border-[#ffd83d] outline-2 outline-[#171717]' : 'border-[#171717]'}`}>{p.imageUrl ? <img src={p.imageUrl} alt={`Page ${page.index}, panel ${i+1}`} className="h-auto w-full" /> : <span className="flex min-h-36 items-center justify-center bg-[#f4ead5] p-4 text-center font-bold">{p.description || `Panel ${i+1} — ${p.status || 'not drawn yet'}`}</span>}</button>)}</div>{page?.status === 'outdated' && <p className="mt-3 border-2 border-[#cf302b] p-3 font-bold">Story changed — this page needs updating.</p>}</div>
+          <aside className="border-2 border-[#171717] p-4"><h3 className="border-b-2 border-[#171717] pb-2 text-lg font-black uppercase">Selected panel</h3>{panel ? <><p className="mt-3 text-sm">Panel {selectedPanel+1} · {panel.status || 'planned'}</p>{panel.evaluation && <div className="mt-3 border-2 border-[#171717] bg-[#fff8e8] p-3"><h4 className="font-bold">Check: {panel.status === 'checking' ? 'checking' : panel.evaluation}</h4>{panel.imageUrl && panel.status !== 'checking' && <p className="mt-2 text-sm">{panel.reviewOutcome ? reviewMessages[panel.reviewOutcome] : 'Review is pending or unavailable.'}</p>}{panel.findings?.map((finding,i) => <p key={i} className="mt-2 text-sm"><strong>{finding.dimension}:</strong> {finding.observed} {finding.expected && `Expected: ${finding.expected}`}</p>)}</div>}<label htmlFor="art-edit" className="mb-1 mt-5 block text-sm font-bold">Edit artwork</label><textarea id="art-edit" value={artEdit} onChange={e => {setArtEdit(e.target.value); setEditDecision(null);}} rows={3} className={field} placeholder="Describe a visual change" /><button disabled={!!busy || !artEdit.trim() || !panel.reviewVersion} className={`${secondaryButton} mt-3 w-full`} onClick={() => panel.reviewVersion && editArtwork(panel.id,panel.reviewVersion)}>Regenerate panel</button>{editDecision?.panelId === panel.id && <div className="mt-3 border-2 border-[#171717] bg-[#fff8e8] p-3" role="status"><p className="font-bold">{editDecision.intent === 'story' ? 'This may change the story.' : 'Does this change the story?'}</p><p className="mt-1 text-sm">{editDecision.reason}</p><button disabled={!!busy} className={`${button} mt-3 w-full`} onClick={() => reviseStory(editDecision.panelId,editDecision.instruction,editDecision.reviewedVersion)}>Preview as story change</button>{editDecision.intent === 'uncertain' && <button disabled={!!busy} className={`${secondaryButton} mt-3 w-full`} onClick={() => confirmArtworkChoice(editDecision)}>Artwork only — story stays unchanged</button>}</div>}<label htmlFor="story-edit" className="mb-1 mt-6 block text-sm font-bold">Change the story</label><textarea id="story-edit" value={storyEdit} onChange={e => setStoryEdit(e.target.value)} rows={3} className={field} placeholder="Describe the plot change" /><p className="mt-2 text-sm">Review the affected range before applying the change.</p><button disabled={!!busy || !storyEdit.trim()} className={`${button} mt-3 w-full`} onClick={() => reviseStory(panel.id)}>Preview story change</button></> : <p className="mt-3 text-sm">Select a panel to edit it.</p>}</aside>
         </div>}
       </div></section>
       {comic.published && <div className="mt-8"><button className={secondaryButton} disabled={!!busy} onClick={() => {if (window.confirm('Withdraw this comic from the public gallery?')) action('Withdrawing','/unpublish');}}>Withdraw from gallery</button></div>}
+      {revisionPreview && <RevisionPreview proposal={revisionPreview} busy={!!busy} error={error} onDismiss={() => {setRevisionPreview(null);setError('');setNotice('Revision not applied.');}} onApply={() => void applyRevision()} />}
       {showPublish && <PublishDialog onDismiss={() => setShowPublish(false)}><h2 id="publish-title" className="font-display text-3xl font-normal uppercase">Publish your comic</h2><p className="mt-3">This edition will be public. Later edits stay private until you republish.</p><form onSubmit={publish} className="mt-5 space-y-4">{error && <Message error>{error}</Message>}<div><label htmlFor="publish-name" className="mb-1 block font-bold">Title</label><input id="publish-name" value={publishTitle} required onChange={e => setPublishTitle(e.target.value)} className={field} /></div><div><label htmlFor="creator" className="mb-1 block font-bold">Creator display name (optional)</label><input id="creator" value={creator} onChange={e => setCreator(e.target.value)} placeholder="Anonymous" className={field} /></div><p className="text-sm">{pages.length} {pages.length===1?'page':'pages'} will be included. Only current, complete pages can be published.</p><div className="flex flex-wrap gap-3"><button type="button" className={secondaryButton} onClick={() => setShowPublish(false)}>Cancel</button><button disabled={!!busy} className={button} type="submit">{comic.published?'Republish':'Publish comic'}</button></div></form></PublishDialog>}
     </>}
   </main></ComicShell>;

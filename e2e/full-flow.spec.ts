@@ -34,8 +34,8 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
     await expect(page.getByRole('img', {name:`Page ${i}, panel 3`})).toBeVisible({timeout:40_000});
     for (let j = 1; j <= 3; j++) {
       await page.getByRole('img', {name:`Page ${i}, panel ${j}`}).click();
-      await expect(page.getByText('Automated review completed without findings. Inspect the panel before accepting.')).toBeVisible();
-      await page.getByRole('button', {name:'Accept and continue'}).click();
+      await expect(page.getByText('Automated review completed without findings.')).toBeVisible();
+      await expect(page.getByRole('button', {name:'Accept and continue'})).toHaveCount(0);
     }
     await expect(page.getByRole('link', {name:'Download page'})).toBeVisible();
   }
@@ -46,7 +46,6 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('button', {name:'Regenerate panel'}).click();
   await expect.poll(async () => page.getByRole('img', {name:'Page 1, panel 1'}).getAttribute('src')).not.toBe(panel1Before);
   await expect(page.getByRole('img', {name:'Page 1, panel 2'})).toHaveAttribute('src', panel2Before!);
-  await page.getByRole('button', {name:'Accept and continue'}).click();
   await page.getByRole('button', {name:'Publish', exact:true}).click();
   await page.getByLabel('Creator display name (optional)').fill('Mina Maker');
   await page.getByRole('button', {name:'Publish comic'}).click();
@@ -67,13 +66,14 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('img',{name:'Page 2, panel 2'}).click();
   const prefixBefore = await page.getByRole('img',{name:'Page 2, panel 1'}).getAttribute('src');
   await page.getByLabel('Change the story').fill('Mina takes the longer route');
-  page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button',{name:'Preview story change'}).click();
-  await expect(page.getByText('Later pages remain outdated until you review the preceding page and generate them.')).toBeVisible({timeout:40_000});
+  const revisionDialog=page.getByRole('dialog',{name:'Review your story change'});
+  await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
+  await revisionDialog.getByRole('button',{name:'Apply story change'}).click();
+  await expect(page.getByText('Later pages remain outdated until you generate them.')).toBeVisible({timeout:40_000});
   await expect(page.getByRole('img',{name:'Page 2, panel 1'})).toHaveAttribute('src', prefixBefore!);
   for (let j = 2; j <= 3; j++) {
     await page.getByRole('img',{name:`Page 2, panel ${j}`}).click();
-    await page.getByRole('button',{name:'Accept and continue'}).click();
   }
   await page.getByRole('button',{name:'Page 3', exact:true}).click();
   await expect(page.getByText('Story changed — this page needs updating.')).toBeVisible();
@@ -82,7 +82,6 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('button',{name:'Regenerate page', exact:true}).click();
   for (let j = 1; j <= 3; j++) {
     await page.getByRole('img',{name:`Page 3, panel ${j}`}).click();
-    await page.getByRole('button',{name:'Accept and continue'}).click();
   }
   await expect(page.getByRole('link',{name:'Download page'})).toBeVisible({timeout:40_000});
   await page.getByRole('button',{name:'Republish',exact:true}).click();

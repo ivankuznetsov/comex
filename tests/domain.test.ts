@@ -69,11 +69,11 @@ describe('comic domain', () => {
     expect(() => acceptPanel(changed, 'alice', 'p2', 'flagged', 1)).toThrow('stale');
     expect(changed.pages[0].panels[1].acceptance).toBeNull();
   });
-  test('uncertain findings require acceptance of the exact current asset and revision', () => {
+  test('uncertain findings do not block publication, and explicit acceptance remains versioned', () => {
     let comic = fixture();
     comic = commitPanelRender(comic, 'alice', 'p2', { storyRevision: 1, panelRevision: 2 }, 'uncertain', 'uncertain');
     comic = setPageComposition(comic, 'alice', 'page-1', 'new-page', ['a1', 'uncertain']);
-    expect(() => publishComic(comic, 'alice', 1, 'edition')).toThrow();
+    expect(publishComic(comic, 'alice', 1, 'edition').published?.id).toBe('edition');
     comic = acceptPanel(comic, 'alice', 'p2', 'uncertain', 1);
     expect(publishComic(comic, 'alice', 1, 'edition').published?.id).toBe('edition');
     const changed = commitPanelRender(comic, 'alice', 'p2', { storyRevision: 1, panelRevision: 3 }, 'next', 'uncertain');

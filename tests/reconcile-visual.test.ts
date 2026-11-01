@@ -20,7 +20,7 @@ test('operator can recover only a stalled review without approving or replacing 
     const recovered=store.getOwned<typeof rendered & {panelFindings:Record<string,unknown[]>;panelReviews:Record<string,unknown>}>('comic','owner')!;
     const panel=recovered.data.pages[0].panels[0];
     expect(panel.assetId).toBe(asset); expect(panel.status).toBe('needs_review'); expect(panel.evaluation).toBe('uncertain');
-    expect(panel.acceptance).toBeNull(); expect(isPanelReady(panel)).toBe(false);
+    expect(panel.acceptance).toBeNull(); expect(isPanelReady(panel)).toBe(true);
     expect(recovered.data.panelFindings.p1).toEqual([]);
     expect(recovered.data.panelReviews.p1).toEqual({assetId:asset,storyRevision:1,panelRevision:2,outcome:'failed'});
     expect(isPanelReady(acceptPanel(recovered.data,'owner','p1',asset,1).pages[0].panels[0])).toBe(true);

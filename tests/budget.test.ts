@@ -8,6 +8,12 @@ function db() { const dir = mkdtempSync(join(tmpdir(), 'comex-budget-')); return
 const ok = async () => new Response('{}', { status: 200 });
 
 describe('provider-call budget', () => {
+  test('rejects a transient in-memory accounting database before dispatch', async () => {
+    let calls=0;
+    const request=createBudgetedFetch(':memory:',async () => {calls++;return ok();},{maxCalls:1,maxConcurrent:1});
+    await expect(request('https://example.test')).rejects.toMatchObject({code:'budget_not_configured'});
+    expect(calls).toBe(0);
+  });
   test('missing configuration fails closed before dispatch', async () => {
     const {dir,path} = db(); let calls=0;
     const request = createBudgetedFetch(path, async () => { calls++; return ok(); }, {maxCalls: undefined, maxConcurrent: 1});

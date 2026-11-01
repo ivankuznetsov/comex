@@ -14,3 +14,8 @@ export function wrapDialogue(text: string, width: number): string[] {
   }
   return lines;
 }
+
+/** Whitespace at a wrapped line boundary is spacing, not a visible indentation. */
+export function displayDialogueLines(text: string, width: number): string[] {
+  return wrapDialogue(text, width).map((line, index) => index ? line.replace(/^\s+/u, '') : line);
+}

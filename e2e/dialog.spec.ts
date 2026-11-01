@@ -43,7 +43,7 @@ test('publish dialog manages keyboard focus and returns it to the trigger', asyn
   await dialog.getByRole('button', { name: 'Publish comic' }).click();
   expect((await publishResponse).status()).toBeGreaterThanOrEqual(400);
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('alert')).toHaveText('All current panels must be generated and reviewed before publishing.');
+  await expect(dialog.getByRole('alert')).toHaveText('All current panels must be generated before publishing.');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(trigger).toBeFocused();
 });
