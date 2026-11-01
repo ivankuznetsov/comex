@@ -69,7 +69,7 @@ This cross-check covers `docs/issues.md` from the older local test snapshot agai
 | 63 | Fixed | The committed mocked suite covers the creator journey, signup, reviews, editing, publication, reader and layout; it does not replace live-quality evaluation. |
 | 64 | Fixed | `e2e/run-full-flow.sh` starts its own isolated server and fake providers. |
 | 65 | Partial | Live QA exercised generation, plot revision, downstream regeneration, publication and reader. One reference each was generated in the other two styles; their comic-panel continuity and actual billed cost remain unverified. |
-| 66 | In progress | App code is committed to the draft PR; explicit user-requested merge is pending checks. The original working checkout remains dirty. |
+| 66 | Fixed | App code and QA changes were merged to `main` after local and hosted checks. The original working checkout remains dirty and was preserved. |
 | 67 | Open | Demo video, final public submission links and production deployment have not been completed or verified. |
 
-Recent integrated checks: 110 automated unit/API tests and typecheck passed after background-review integration. A full current-branch browser run and exact-head hosted CI still need verification; live email delivery has not been configured or tested.
+Recent integrated checks: 110 automated unit/API tests, typecheck, and 15 mocked browser tests passed. Hosted QA passed on the PR and merge commit. Live email delivery has not been configured or tested.
