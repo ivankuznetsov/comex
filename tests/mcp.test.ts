@@ -121,6 +121,10 @@ describe('MCP HTTP boundary',()=>{
     const {client,transport}=clientFor(handle,'all-secret',true);
     await client.connect(transport);
     try {
+      const guidance=client.getInstructions()?.slice(0,512) ?? '';
+      expect(guidance).toContain('initial questions');
+      expect(guidance).toContain('character suggestions');
+      expect(guidance).toContain('Never invent answers or approve');
       const tools=(await client.listTools()).tools;
       expect(tools.map(tool=>tool.name)).toContain('comex_get_asset');
       const draft=await client.callTool({name:'comex_get_comic',arguments:{comicId:'comic'}});

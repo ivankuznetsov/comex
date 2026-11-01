@@ -51,6 +51,20 @@ async function fixture() {
 }
 
 describe('browser-owned OAuth connections',()=>{
+  test('a fresh browser grant belongs to a new empty owner, not the existing browser',async()=>{
+    const f=await fixture(),client=await f.register();
+    try {
+      const pending=await f.authorize(client);
+      const response=await f.server.consent(new Request(base+'/api/mcp-auth/comex/consent',{method:'POST',headers:{'content-type':'application/json',origin:base},body:JSON.stringify({oauth_query:pending.query,accept:true,email:'fresh@example.test'})}));
+      expect(response.status).toBe(200);
+      const freshCookie=response.headers.getSetCookie().find(value=>value.startsWith('comex_session='));expect(freshCookie).toBeTruthy();
+      const freshToken=freshCookie!.split(';')[0].split('=')[1],fresh=f.store.guestIdentity(freshToken);expect(fresh?.owner).toBeTruthy();expect(fresh!.owner).not.toBe(f.guest.owner);
+      const code=new URL((await response.json()).redirect).searchParams.get('code')!,token=await f.exchange(client,code,pending.verifier);expect(token.status).toBe(200);
+      const tokens=await token.json(),actor=await f.server.authenticate(new Request(resource,{headers:{authorization:`Bearer ${tokens.access_token}`}}),['comex:read']);
+      expect(actor?.ownerId).toBe(fresh!.owner);expect(f.store.listOwned(fresh!.owner)).toEqual([]);expect(f.store.getOwned('draft',actor!.ownerId)).toBeNull();
+      expect(f.store.getOwned('draft',f.guest.owner)?.data).toEqual({ownerId:f.guest.owner,title:'Shared draft'});
+    } finally {f.database.close();f.store.close();}
+  });
   test('PKCE, consent and signed bearer map to the existing browser owner and scope',async()=>{
     const f=await fixture(),client=await f.register(),{tokens,code,verifier}=await f.complete(client);
     const actor=await f.server.authenticate(new Request(resource,{headers:{authorization:`Bearer ${tokens.access_token}`}}),['comex:read']);
@@ -80,6 +94,34 @@ describe('browser-owned OAuth connections',()=>{
     const approved=await f.approve(pending.query);const code=new URL((await approved.json()).redirect).searchParams.get('code')!;
     expect((await f.exchange(client,code,pending.verifier,'https://wrong.example/mcp')).ok).toBe(false);
     f.database.close();f.store.close();
+  });
+  test('unregistered or changed redirect URIs cannot create a grant or mutate drafts',async()=>{
+    const f=await fixture(),client=await f.register();
+    try {
+      const clientsBefore=(f.database.prepare('SELECT count(*) AS count FROM "oauthClient"').get() as {count:number}).count;
+      const badRegistration=await f.call('/oauth2/register',{method:'POST',headers:{'content-type':'application/json',origin:base},body:JSON.stringify({application_type:'native',client_name:'Unsafe client',redirect_uris:['javascript:alert(1)'],token_endpoint_auth_method:'none',grant_types:['authorization_code'],response_types:['code']})});
+      expect(badRegistration.ok).toBe(false);
+      expect((f.database.prepare('SELECT count(*) AS count FROM "oauthClient"').get() as {count:number}).count).toBe(clientsBefore);
+      const verifier=randomBytes(32).toString('base64url');
+      const substituted='http://127.0.0.1:64321/changed';
+      const query=new URLSearchParams({client_id:client,redirect_uri:substituted,response_type:'code',code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256',scope:'comex:read',resource});
+      const authorization=await f.call('/oauth2/authorize?'+query);
+      expect(authorization.ok).toBe(false);
+      const location=authorization.headers.get('location');
+      if(location) expect(new URL(location,base).href.startsWith(substituted)).toBe(false);
+      const pending=await f.authorize(client);
+      const changed=new URLSearchParams(pending.query);changed.set('redirect_uri',substituted);
+      expect((await f.approve(changed.toString())).status).toBe(400);
+      expect((f.database.prepare('SELECT count(*) AS count FROM mcp_grants').get() as {count:number}).count).toBe(0);
+      expect((f.database.prepare('SELECT count(*) AS count FROM "session"').get() as {count:number}).count).toBe(0);
+      expect(f.store.getOwned('draft',f.guest.owner)?.data).toEqual({ownerId:f.guest.owner,title:'Shared draft'});
+      const approved=await f.approve(pending.query);expect(approved.status).toBe(200);
+      const code=new URL((await approved.json()).redirect).searchParams.get('code')!;
+      const exchange=await f.call('/oauth2/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client,code,redirect_uri:substituted,code_verifier:pending.verifier,resource})});
+      expect(exchange.ok).toBe(false);expect((await exchange.json()).access_token).toBeUndefined();
+      expect((f.database.prepare('SELECT count(*) AS count FROM mcp_grants').get() as {count:number}).count).toBe(1);
+      expect(f.store.getOwned('draft',f.guest.owner)?.data).toEqual({ownerId:f.guest.owner,title:'Shared draft'});
+    } finally {f.database.close();f.store.close();}
   });
   test('revocation denies old access and refresh without disturbing another grant or the browser',async()=>{
     const f=await fixture(),c1=await f.register(),c2=await f.register(),g1=await f.complete(c1),g2=await f.complete(c2);
