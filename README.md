@@ -61,7 +61,7 @@ bun run typecheck && bun run test && bun run build
 
 ## Stack
 
-Next.js, TypeScript, Tailwind CSS, Bun, OpenAI (`gpt-5.6-terra` for story and checks, `gpt-image-2.5-flare` for art), deployed on Vercel. The Vercel demo currently routes its API to a local gateway, so drafts and images live on the presenter's machine.
+Next.js, TypeScript, Tailwind CSS, Bun, OpenAI (`gpt-6.1-terra` for story and checks, `gpt-image-2.5-flare` for art), deployed on Vercel. The Vercel demo currently routes its API to a local gateway, so drafts and images live on the presenter's machine.
 
 ## Credits
 

@@ -49,7 +49,7 @@ function checkReferences(references: Reference[]): void {
 }
 export function createAIService(options: AIOptions = {}) {
   const key = options.apiKey ?? process.env.OPENAI_API_KEY ?? '';
-  const textModel = options.textModel || process.env.OPENAI_TEXT_MODEL || 'gpt-5.6-terra';
+  const textModel = options.textModel || process.env.OPENAI_TEXT_MODEL || 'gpt-6.1-terra';
   const imageModel = options.imageModel || process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare';
   const request = options.fetch ?? globalThis.fetch;
   async function post<T>(path: string, body: BodyInit, json: boolean, validate?: (value: unknown) => T): Promise<T | unknown> {
