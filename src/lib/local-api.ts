@@ -123,8 +123,8 @@ function ensureLocal(request: NextRequest) {
   if (process.env.VERCEL || !validHost) throw new HttpError(403, 'Local storage is available only on localhost.');
 }
 function panelReviewKey(panel:Panel):string {return `panel:${panel.id}:${panel.assetId}:${panel.storyRevision}:${panel.revision}`;}
-function advisoryProvider() {
-  return createAIService({fetch:createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))});
+function advisoryProvider(comicId:string) {
+  return createAIService({fetch:createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'),globalThis.fetch,undefined,comicId)});
 }
 function scheduleNarrativeReview(store:LocalStore,draft:Draft) {
   const runId=(draft as Draft & {storyReviewRunId?:string}).storyReviewRunId,storyboard=draft.storyboard;
@@ -133,7 +133,7 @@ function scheduleNarrativeReview(store:LocalStore,draft:Draft) {
     let review:unknown;
     try {
       const answers=Object.fromEntries(draft.questions.filter(question=>draft.answers[question.id]?.trim()).map(question=>[question.question,draft.answers[question.id].trim()]));
-      review=await advisoryProvider().narrativeJudge({creatorGoal:draft.plot,answers,bible:storyboard.bible,beats:storyboard.pages});
+      review=await advisoryProvider(draft.id).narrativeJudge({creatorGoal:draft.plot,answers,bible:storyboard.bible,beats:storyboard.pages});
     } catch {review={outcome:'failed',findings:[]};}
     const latest=store.getReviewTarget<Draft & {storyReviewRunId?:string}>(draft.id);
     if(!latest || latest.data.storyReviewRunId!==runId || latest.data.storyRevision!==draft.storyRevision || !sameJson(latest.data.storyboard,storyboard))return;
@@ -144,7 +144,7 @@ function scheduleVisualReview(store:LocalStore,input:{draft:Draft;panelId:string
   void (async()=>{
     let findings:unknown[]=[],outcome='failed';
     try {
-      const result=await advisoryProvider().visualJudge({bible:input.bible,styleRules:input.styleRules,beats:input.beats,references:[...input.references,{role:'generated panel',id:input.panelId,bytes:await asset(input.assetId),mimeType:'image/png'}]});
+      const result=await advisoryProvider(input.draft.id).visualJudge({bible:input.bible,styleRules:input.styleRules,beats:input.beats,references:[...input.references,{role:'generated panel',id:input.panelId,bytes:await asset(input.assetId),mimeType:'image/png'}]});
       findings=result.findings;outcome=result.outcome;
     } catch { /* Retain the generated image with an incomplete review. */ }
     const latest=store.getReviewTarget<Draft>(input.draft.id);
@@ -183,6 +183,7 @@ function serviceFor(store:LocalStore) {
   const dependencies={
     repository:store, assets:{read:asset,save:saveAsset,discard:discardAsset}, provider:createAIService, id:randomUUID,
     budgetFetch:(input:string|URL|Request,init?:RequestInit) => createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))(input,init),
+    budgetFetchFor:(comicId:string)=>createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'),globalThis.fetch,undefined,comicId),
     advisory:{resolve:(draft:Draft)=>resolveAdvisory(store,draft),narrative:(draft:Draft)=>scheduleNarrativeReview(store,draft),visual:(input:Parameters<typeof scheduleVisualReview>[1])=>scheduleVisualReview(store,input)},
   };
   return createComicService(dependencies);

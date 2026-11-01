@@ -55,6 +55,7 @@ export interface ComicDependencies {
   assets: ComicAssets;
   provider(options:{fetch:NonNullable<AIOptions['fetch']>}): ReturnType<typeof createAIService>;
   budgetFetch: NonNullable<AIOptions['fetch']>;
+  budgetFetchFor?(comicId:string):NonNullable<AIOptions['fetch']>;
   durable?: DurableComicContext;
   /** Local schedulers persist version-bound advisory results after the draft commit. */
   advisory?: {

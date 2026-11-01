@@ -99,7 +99,7 @@ export function createComicService(deps: ComicDependencies) {
         }
         return {...updated,panelReviews,panelFindings};
     }
-    const ai = () => deps.provider({ fetch: deps.budgetFetch });
+    const ai = (comicId:string) => deps.provider({ fetch: deps.budgetFetchFor?.(comicId) ?? deps.budgetFetch });
     const asset = async (id: string) => await deps.assets.read(id);
     const saveAsset = async (bytes: Buffer) => {
         if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
@@ -634,8 +634,8 @@ export function createComicService(deps: ComicDependencies) {
         let assetCommitted = false;
         try {
             const bytes = edit
-                ? await ai().editPanel({ change: edit.instruction, mode:edit.mode, preserve: JSON.stringify({ style: styleRules(draft.styleId), panel: spec, characters }), references: [{ role: 'target panel', id: panelId, bytes: await asset(panel.assetId!), mimeType: 'image/png' }, ...references] })
-                : await ai().panel({ styleRules: styleRules(draft.styleId), panelSpec: JSON.stringify(visualSpec), sceneBefore: JSON.stringify(spec.state_before), characters, references });
+                ? await ai(draft.id).editPanel({ change: edit.instruction, mode:edit.mode, preserve: JSON.stringify({ style: styleRules(draft.styleId), panel: spec, characters }), references: [{ role: 'target panel', id: panelId, bytes: await asset(panel.assetId!), mimeType: 'image/png' }, ...references] })
+                : await ai(draft.id).panel({ styleRules: styleRules(draft.styleId), panelSpec: JSON.stringify(visualSpec), sceneBefore: JSON.stringify(spec.state_before), characters, references });
             assetId = await saveAsset(bytes);
             for (let attempt = 0; attempt < 3; attempt++) {
                 const latest = (await store.getOwned<Draft>(comicId, session));
@@ -688,7 +688,7 @@ export function createComicService(deps: ComicDependencies) {
         let findings: Awaited<ReturnType<ReturnType<typeof ai>['visualJudge']>>['findings'] = [];
         let outcome: PanelReview['outcome'] = 'failed';
         try {
-            const result = await ai().visualJudge({ bible: storyboard.bible, styleRules: styleRules(draft.styleId), beats: visualSpec,
+            const result = await ai(draft.id).visualJudge({ bible: storyboard.bible, styleRules: styleRules(draft.styleId), beats: visualSpec,
                 references: [...references, { role: 'generated panel', id: panelId, bytes: await asset(assetId), mimeType: 'image/png' }] });
             findings = result.findings;
             outcome = result.outcome;
@@ -776,7 +776,7 @@ export function createComicService(deps: ComicDependencies) {
             if (!(await store.update(id, session, revision, { ...data, initialQuestions: 'running' })))
                 throw new ApplicationError('conflict', 'Draft changed before asking questions.');
             try {
-                const generated = await ai().questions({ plot: data.plot, style: data.styleId, answers: answeredQuestions(data), limit: 5 });
+                const generated = await ai(id).questions({ plot: data.plot, style: data.styleId, answers: answeredQuestions(data), limit: 5 });
                 const seen = new Set<string>();
                 const questions = generated.filter(question => { const key = question.question.trim().toLocaleLowerCase('en-US'); if (seen.has(key))
                     return false; seen.add(key); return true; }).map(question => ({ ...question, id: deps.id() }));
@@ -808,7 +808,7 @@ export function createComicService(deps: ComicDependencies) {
             return await withTextOperation(store, session, id, revision, async () => {
                 const answered = data.questions.filter(question => data.answers[question.id]?.trim());
                 const limit = Math.max(0, 5 - answered.length);
-                const additions = limit ? await ai().questions({ plot: data.plot, style: data.styleId, answers: answeredQuestions(data), limit }) : [];
+                const additions = limit ? await ai(id).questions({ plot: data.plot, style: data.styleId, answers: answeredQuestions(data), limit }) : [];
                 const seen = new Set(answered.map(question => question.question.trim().toLocaleLowerCase('en-US')));
                 const questions = [...answered];
                 for (const question of additions) {
@@ -849,7 +849,7 @@ export function createComicService(deps: ComicDependencies) {
             if (!(await store.update(id, session, revision, { ...data, initialSuggestions: 'running' })))
                 throw new ApplicationError('conflict', 'Draft changed before suggesting characters.');
             try {
-                const generated = await ai().characterSuggestions({ plot: data.plot, style: data.styleId, answers: answeredQuestions(data), existingCharacters: data.characters.map(({ name, role }) => ({ name, role })) });
+                const generated = await ai(id).characterSuggestions({ plot: data.plot, style: data.styleId, answers: answeredQuestions(data), existingCharacters: data.characters.map(({ name, role }) => ({ name, role })) });
                 const seen = new Set<string>();
                 const characterSuggestions = generated.filter(card => { const key = card.name.toLocaleLowerCase('en-US'); if (seen.has(key))
                     return false; seen.add(key); return true; }).map(card => ({ id: deps.id(), ...card }));
@@ -902,7 +902,7 @@ export function createComicService(deps: ComicDependencies) {
         if (data.characters.some(c => data.operations?.[`character:${c.id}`]))
             throw new ApplicationError('conflict', 'Resolve character reference requests before planning the story.');
         return await withTextOperation(store, session, id, revision, async () => {
-            const generated = await ai().storyboard({ plot: data.plot, answers: answeredQuestions(data), styleRules: styleRules(data.styleId), characters: data.characters, pageCount: data.pageCount ?? 3, panelsPerPage: data.panelsPerPage ?? 3 });
+            const generated = await ai(id).storyboard({ plot: data.plot, answers: answeredQuestions(data), styleRules: styleRules(data.styleId), characters: data.characters, pageCount: data.pageCount ?? 3, panelsPerPage: data.panelsPerPage ?? 3 });
             const storyboard = { ...generated, pages: generated.pages.map(page => ({ ...page, panels: page.panels.map(normalizePanelLedger) })) };
             const ledgerErrors = validateStoryLedger(storyboard);
             if (ledgerErrors.length)
@@ -911,7 +911,7 @@ export function createComicService(deps: ComicDependencies) {
                 pages: storyboard.pages.map(p => ({ id: deps.id(), panels: p.panels.map(panel => ({ id: panel.id, beat: panel.action })) })) });
             let storyReview: unknown={outcome:'pending',findings:[]};
             if(!deps.advisory) {
-                try {storyReview=await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
+                try {storyReview=await ai(id).narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
                 catch(error){storyReview=inconclusiveReview(error);}
             }
             const next:Draft={...data,...planned,storyboard,storyReview,storyReviewRunId:deps.advisory?deps.id():undefined,storyReviewAcceptance:undefined,storyApproval:null};
@@ -938,7 +938,7 @@ export function createComicService(deps: ComicDependencies) {
         let assetId: string | undefined;
         let assetCommitted = false;
         try {
-            const bytes = await ai().characterReference({ character, styleRules: styleRules(data.styleId) });
+            const bytes = await ai(id).characterReference({ character, styleRules: styleRules(data.styleId) });
             assetId = await saveAsset(bytes);
             for (let attempt = 0; attempt < 3; attempt++) {
                 const latest = (await store.getOwned<Draft>(id, session));
@@ -1047,7 +1047,7 @@ export function createComicService(deps: ComicDependencies) {
         }
         const currentStoryboard = data.storyboard;
         return await withTextOperation(store, session, id, revision, async () => {
-            const generated = await ai().revision({ storyboard: currentStoryboard, firstPanelId: body.panelId, instruction: body.instruction, characters: data.characters });
+            const generated = await ai(id).revision({ storyboard: currentStoryboard, firstPanelId: body.panelId, instruction: body.instruction, characters: data.characters });
             const result = { ...generated, revised_suffix: generated.revised_suffix.map(normalizePanelLedger) };
             const changed = new Map(result.revised_suffix.map(panel => [panel.id, panel]));
             const proposed: Storyboard = { ...currentStoryboard, bible: result.revised_bible, pages: currentStoryboard.pages.map(page => ({ ...page, panels: page.panels.map(panel => changed.get(panel.id) ?? panel) })) };
@@ -1082,7 +1082,7 @@ export function createComicService(deps: ComicDependencies) {
             const updated=preservePrefixReviews(data,resolved,reviseStory(resolved,session,data.storyRevision,proposal.result.earliest_affected_panel_id,beats) as Draft,proposal.result.earliest_affected_panel_id);
             let storyReview:unknown={outcome:'pending',findings:[]};
             if(!deps.advisory) {
-                try {storyReview=await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
+                try {storyReview=await ai(id).narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
                 catch(error){storyReview=inconclusiveReview(error);}
             }
             const next: Draft = { ...updated, storyboard, storyReview, storyReviewRunId:deps.advisory?deps.id():undefined, storyReviewAcceptance: undefined, pendingRevision: undefined, pageOperations: undefined };
@@ -1195,7 +1195,7 @@ export function createComicService(deps: ComicDependencies) {
         const snapshot:EditSnapshot = {draftRevision:revision,storyRevision:data.storyRevision,panelRevision:panel.revision,assetId:panel.assetId};
         const references:Reference[] = [{role:'target panel',id:panel.id,bytes:await asset(panel.assetId),mimeType:'image/png'}, ...await Promise.all(characters.map(async character => ({role:'approved character',id:character.id,bytes:await asset(character.referenceAssetId!),mimeType:'image/png' as const})))];
         const execution = await withTextOperation(store,session,id,revision,async () => {
-            const decision = await ai().classifyEditContextual({instruction:body.instruction,panel:spec,bible:data.storyboard!.bible,characters,references});
+            const decision = await ai(id).classifyEditContextual({instruction:body.instruction,panel:spec,bible:data.storyboard!.bible,characters,references});
             const latest = await store.getOwned<Draft>(id,session);
             const current = latest?.data.pages.flatMap(page => page.panels).find(item => item.id === panel.id);
             if (!latest || latest.revision !== snapshot.draftRevision || !current || !artworkReady(latest.data,current) || current.assetId !== snapshot.assetId || current.revision !== snapshot.panelRevision || current.storyRevision !== snapshot.storyRevision || latest.data.storyRevision !== snapshot.storyRevision)

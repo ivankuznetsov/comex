@@ -1,3 +1,4 @@
+import {COST_SCHEMA,beginCost,attachCostReceipt,sqliteCostStore} from './ai/cost-ledger';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -35,6 +36,7 @@ export class ProviderBudget {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );`);
+    this.db.exec(COST_SCHEMA);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const columns=this.db.prepare('PRAGMA table_info(provider_reservations)').all() as {name:string}[];
@@ -84,6 +86,7 @@ export class ProviderBudget {
     const row = this.db.prepare("SELECT count(*) AS used, coalesce(sum(CASE WHEN state IN ('running','unknown') THEN 1 ELSE 0 END),0) AS active, coalesce(sum(CASE WHEN state='unknown' THEN 1 ELSE 0 END),0) AS unknown FROM provider_reservations").get() as {used: number; active: number; unknown: number};
     return {used: Number(row.used), active: Number(row.active), unknown: Number(row.unknown)};
   }
+  cancelUndispatched(id:string):void {this.db.prepare("DELETE FROM provider_reservations WHERE id=? AND state='running'").run(id);}
   close(): void { this.db.close(); }
 }
 
@@ -101,7 +104,7 @@ export function finalizeBudgetedResponse(response: Response, state: 'completed' 
 
 /** No automatic retries. An indeterminate response remains an outstanding reservation. */
 export function createBudgetedFetch(path: string, fetcher: FetchLike = globalThis.fetch,
-  config?: BudgetConfig): FetchLike {
+  config?: BudgetConfig, comicId?:string): FetchLike {
   return async (input, init) => {
     // A fresh SQLite memory database on each call silently discards the budget.
     if (path === ':memory:') throw new BudgetError('budget_not_configured', 'Use a persistent database for provider call accounting.');
@@ -109,8 +112,13 @@ export function createBudgetedFetch(path: string, fetcher: FetchLike = globalThi
     let reservation: string;
     try { reservation = budget.reserve(); } catch (error) { budget.close(); throw error; }
     let response: Response;
+    const costDb=comicId?sqliteCostStore(path):null;
+    const costContext={reservationId:reservation,comicId:comicId??''};
+    let costMeta:Awaited<ReturnType<typeof beginCost>>|null=null;
+    if(costDb)try{costMeta=await beginCost(costDb,costContext,input,init);}catch{try{budget.cancelUndispatched(reservation);}finally{budget.close();}throw new BudgetError('budget_not_configured','AI request tracking is unavailable; no provider request was sent.');}
     try {
       response = await fetcher(input, init);
+      if(costDb && costMeta){attachCostReceipt(response,costDb,costContext,costMeta);}
     } catch (error) {
       try { budget.finish(reservation, 'unknown'); } finally { budget.close(); }
       throw error;
