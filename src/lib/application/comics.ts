@@ -78,6 +78,10 @@ function requireStoryApproval(draft: Draft): void {
     if (!isStoryApproved(draft))
         throw new ApplicationError('conflict', 'Review and approve the current story before generating artwork.');
 }
+function revisionCompletionNotice(firstPage:number, pageCount:number, previousReady:boolean):string {
+    if (!previousReady) return 'Story change saved. Draw earlier pages before continuing.';
+    return firstPage < pageCount - 1 ? 'Later pages remain outdated until you generate them.' : 'Story updated. Review the updated artwork and checks.';
+}
 function xml(value: string): string { if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]/u.test(value))
     throw new ApplicationError('invalid_input', 'Dialogue includes a character that cannot be rendered.'); return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;'); }
 export const durableComicServiceVersion='comex-durable-service-v1' as const;
@@ -361,7 +365,7 @@ export function createComicService(deps: ComicDependencies) {
                 if(!currentPanel){notice='Story change saved, but a panel is missing.';break;}
             }
         }
-        notice ||= 'Later pages remain outdated until you generate them.';
+        notice ||= revisionCompletionNotice(firstPage,next.pages.length,previousReady);
         await settled(`${prefix}/finished`,async()=>({notice}));return {comic:await viewCurrent(session,id),notice};
     }
     async function durableEditPanel(session:Actor,id:string,itemId:string,payload:unknown,expectedRevision?:number) {
@@ -1176,7 +1180,7 @@ export function createComicService(deps: ComicDependencies) {
             }
         }
         const latest = (await store.getOwned<Draft>(id, session))!;
-        return ({ comic: view(latest.data, (await store.getPublished<Edition>(id)), latest.revision), notice: pausedNotice || 'Later pages remain outdated until you generate them.' });
+        return ({ comic: view(latest.data, (await store.getPublished<Edition>(id)), latest.revision), notice: pausedNotice || revisionCompletionNotice(firstPage,next.pages.length,previousPageReady) });
     }
     async function downloadPage(session: Actor, id: string, itemId: string, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);

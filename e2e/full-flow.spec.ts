@@ -108,10 +108,12 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
   await revisionDialog.getByRole('button',{name:'Close preview'}).click();
   await page.reload();
+  await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
+  await revisionDialog.getByRole('button',{name:'Close preview'}).click();
   await page.getByRole('button',{name:'Page 2',exact:true}).click();
   await page.getByRole('img',{name:'Page 2, panel 2'}).click();
   await expect(page.getByLabel('Change the story')).toHaveValue('Mina takes the longer route');
-  await page.getByRole('button',{name:'Resume saved preview'}).click();
+  await page.getByRole('button',{name:'Show story revision preview'}).click();
   await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
   await revisionDialog.getByRole('button',{name:'Apply story change'}).click();
   await expect(page.getByText(/Story updated\. Later pages need to be drawn again\.|Later pages remain outdated until you .*generate them\./)).toBeVisible({timeout:40_000});
@@ -123,7 +125,7 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(page.getByText('Story changed — this page needs updating.')).toBeVisible();
   await reader.reload();
   await expect(reader.getByText('Page 2 of 3')).toBeVisible();
-  await page.getByRole('button',{name:'Generate page', exact:true}).click();
+  await page.getByRole('button',{name:'Redraw entire page', exact:true}).click();
   for (let j = 1; j <= 3; j++) {
     await page.getByRole('img',{name:`Page 3, panel ${j}`}).click();
   }
