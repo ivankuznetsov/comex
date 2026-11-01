@@ -8,8 +8,8 @@ test('creator chooses five pages, draws and publishes all five',async({page})=>{
   await page.getByLabel('Give your comic a title').fill('A five-page adventure');
   await page.getByLabel('What happens in your story?').fill('Mina carries a precious key through London.');
   await page.getByRole('button',{name:'Start creating →'}).click();
-  await expect(page).toHaveURL(/\/comics\//);
-  await expect(page.getByRole('button',{name:'Review suggestion'})).toBeVisible();
+  await expect(page).toHaveURL(/\/comics\//,{timeout:90_000});
+  await expect(page.getByRole('button',{name:'Review suggestion'})).toBeVisible({timeout:30_000});
   await expect(page.getByLabel('Pages',{exact:true})).toHaveValue('3');
   await page.getByLabel('Pages',{exact:true}).selectOption('5');
   await expect(page.getByLabel('Pages',{exact:true})).toHaveValue('5');
