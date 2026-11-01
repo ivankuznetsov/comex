@@ -26,6 +26,7 @@ FORWARDED_HEADERS = (
     "Next-Router-State-Tree", "Next-Router-Prefetch",
     "Next-Router-Segment-Prefetch", "Next-Url",
 )
+CLIENT_IO_TIMEOUT_SECONDS = 30
 
 
 def https_origin(value):
@@ -44,6 +45,12 @@ def https_origin(value):
 
 
 class Preview(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        # Bound slow request headers/bodies. This socket is separate from the
+        # upstream connection, whose longer timeout permits image generation.
+        self.connection.settimeout(getattr(self.server, "client_io_timeout", CLIENT_IO_TIMEOUT_SECONDS))
+
     def do_GET(self):
         self.forward()
 
@@ -80,6 +87,17 @@ class Preview(BaseHTTPRequestHandler):
             self.send_error(413, "Invalid or oversized request")
             return
 
+        try:
+            body = self.rfile.read(size) if size else None
+        except TimeoutError:
+            self.send_error(408, "Request body timed out")
+            self.close_connection = True
+            return
+        if body is not None and len(body) != size:
+            self.send_error(400, "Incomplete request body")
+            self.close_connection = True
+            return
+
         port = self.server.upstream_port
         conn = HTTPConnection("127.0.0.1", port, timeout=900)
         headers = {"Host": f"127.0.0.1:{port}"}
@@ -89,7 +107,7 @@ class Preview(BaseHTTPRequestHandler):
         if self.command not in ("GET", "HEAD"):
             headers["Origin"] = f"http://127.0.0.1:{port}"
         try:
-            conn.request(self.command, self.path, body=self.rfile.read(size) if size else None, headers=headers)
+            conn.request(self.command, self.path, body=body, headers=headers)
             response = conn.getresponse()
             self.send_response(response.status)
             for name, value in response.getheaders():

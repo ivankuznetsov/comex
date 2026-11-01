@@ -3,6 +3,7 @@
 import http.client
 import importlib.util
 import json
+import socket
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ SPEC.loader.exec_module(proxy)
 
 class FakeUpstream(BaseHTTPRequestHandler):
     def do_POST(self):
+        self.server.requests_received += 1
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode()
         result = json.dumps({
@@ -43,8 +45,10 @@ class DemoProxyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream)
+        cls.upstream.requests_received = 0
         cls.gateway = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Preview)
         cls.gateway.upstream_port = cls.upstream.server_address[1]
+        cls.gateway.client_io_timeout = 0.2
         cls.gateway.allowed_origins = frozenset({"https://comex.example"})
         cls.threads = [threading.Thread(target=server.serve_forever, daemon=True)
                        for server in (cls.upstream, cls.gateway)]
@@ -100,6 +104,17 @@ class DemoProxyTest(unittest.TestCase):
             with self.subTest(path=path):
                 response, _ = self.request("https://comex.example", path=path)
                 self.assertEqual(response.status, 403)
+
+    def test_incomplete_body_times_out_without_dispatching_upstream(self):
+        previous_requests = self.upstream.requests_received
+        with socket.create_connection(("127.0.0.1", self.gateway.server_address[1]), timeout=2) as client:
+            client.sendall(
+                b"POST /api/comics HTTP/1.1\r\nHost: comex.example\r\n"
+                b"Origin: https://comex.example\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 100\r\n\r\n{"
+            )
+            self.assertIn(b" 408 ", client.recv(4096))
+        self.assertEqual(self.upstream.requests_received, previous_requests)
 
 
 if __name__ == "__main__":
