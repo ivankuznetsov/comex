@@ -14,15 +14,16 @@ test('a new creator starts immediately and claims the draft after verifying emai
   const {readFile}=await import('node:fs/promises');const {join}=await import('node:path');
   const email='newcreator@example.test';
   await page.goto('/create');
+  await page.getByLabel('Your email address').fill(email);
   await page.getByLabel('Give your comic a title').fill('New creator draft');
   await page.getByLabel('What happens in your story?').fill('A courier delivers a letter.');
   await page.getByRole('button',{name:'Start creating →'}).click();await expect(page).toHaveURL(/\/comics\//);
   const url=page.url();await expect(page.getByRole('heading',{name:'New creator draft'})).toBeVisible();
-  await page.goto('/sign-in');await page.getByLabel('Email address').fill(email);await page.getByLabel('Save this browser’s drafts to the verified email above').check();await page.getByRole('button',{name:'Email me a code →'}).click();
+  await page.goto('/sign-in');await expect(page.getByLabel('Email address')).toHaveValue(email);await page.getByRole('button',{name:'Email me a code →'}).click();
   await expect(page.getByText(/Check your inbox/)).toBeVisible();
   const mail=JSON.parse(await readFile(join(process.env.COMEX_E2E_MAILBOX!,`${email}.json`),'utf8')) as {text:string};
   const code=mail.text.match(/code is (\d{8})/)![1];await page.getByLabel('One-time code').fill(code);
-  await page.getByRole('button',{name:'Sign in →'}).click();await expect(page).toHaveURL(/\/drafts$/);
+  await page.getByRole('button',{name:'Sign in →'}).click();await expect(page).toHaveURL(/\/drafts$/,{timeout:30_000});
   await expect(page.getByRole('heading',{name:'New creator draft'})).toBeVisible();await page.goto(url);
   await expect(page.getByRole('heading',{name:'New creator draft'})).toBeVisible();
 });

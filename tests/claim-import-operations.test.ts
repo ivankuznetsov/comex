@@ -1,6 +1,6 @@
 import {afterAll,beforeAll,describe,expect,test} from 'bun:test';
 import {DatabaseSync} from 'node:sqlite';
-import {mkdtempSync,rmSync,mkdirSync} from 'node:fs';
+import {mkdtempSync,rmSync,mkdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -35,6 +35,53 @@ pgDescribe('imported operation ownership',()=>{
     const challenge=await issueImportChallenge({pool,identityStore:hosted,cookie:targetCookie,batchId,origin,secret});
     return (await attestImport({identityStore:s.store,cookie:sourceCookie,challenge:challenge!,origin,secret}))!;
   }
+  test('imports exact completed advisory reviews and allows their owner to claim the saved artwork',async()=>{
+    const s=await source();try {
+      const guest=s.store.createGuest('creator@example.test'),image=randomUUID(),passedImage=randomUUID(),failedImage=randomUUID();
+      const panel={id:'panel-1',assetId:image,storyRevision:2,revision:3,status:'checking',evaluation:'uncertain'};
+      const passed={id:'panel-2',assetId:passedImage,storyRevision:2,revision:1,status:'checking',evaluation:'uncertain'};
+      const failed={id:'panel-3',assetId:failedImage,storyRevision:2,revision:1,status:'checking',evaluation:'uncertain'};
+      const draft={ownerId:guest.owner,storyRevision:2,storyReviewRunId:'review-1',pages:[{id:'page-1',panels:[panel,passed,failed]}]};
+      s.store.create('review-draft',guest.owner,draft);
+      for(const id of [image,passedImage,failedImage])writeFileSync(join(s.assetPath,`${id}.png`),Buffer.from([137,80,78,71,13,10,26,10]));
+      expect(s.store.putAdvisoryReview('review-draft',guest.owner,`panel:panel-1:${image}:2:3`,{outcome:'findings',findings:[{severity:'warning',message:'Check the coat'}]})).toBe(true);
+      s.store.putAdvisoryReview('review-draft',guest.owner,`panel:panel-2:${passedImage}:2:1`,{outcome:'pass',findings:[]});
+      s.store.putAdvisoryReview('review-draft',guest.owner,`panel:panel-3:${failedImage}:2:1`,{outcome:'failed',findings:[]});
+      expect(s.store.putAdvisoryReview('review-draft',guest.owner,'story:review-1:2',{outcome:'pass',findings:[]})).toBe(true);
+      const batch='review-batch',args={pool,objects:s.objects,databasePath:s.path,assetPath:s.assetPath,batchId:batch};
+      await importSqlite(args);await importSqlite(args);
+      const imported=(await pool.query('SELECT draft FROM comics WHERE id=$1',['review-draft'])).rows[0].draft;
+      expect(imported.pages[0].panels[0]).toMatchObject({id:'panel-1',assetId:image,storyRevision:2,revision:3,status:'needs_review',evaluation:'warning'});
+      expect(imported.panelReviews['panel-1']).toEqual({assetId:image,storyRevision:2,panelRevision:3,outcome:'findings'});
+      expect(imported.panelFindings['panel-1']).toEqual([{severity:'warning',message:'Check the coat'}]);
+      expect(imported.pages[0].panels[1]).toMatchObject({status:'current',evaluation:'pass'});
+      expect(imported.pages[0].panels[2]).toMatchObject({status:'needs_review',evaluation:'uncertain'});
+      expect(imported.storyReview).toEqual({outcome:'pass',findings:[]});
+      const hosted=new PostgresAuth(pool),target=await hosted.createGuest('target@example.test'),cookie=`comex_session=${target.token}`;
+      const token=await proof(s,batch,`comex_session=${guest.token}`,cookie);
+      expect(await redeemImport({pool,identityStore:hosted,cookie,proof:token,origin,secret})).toBe(true);
+      const claimed=(await pool.query('SELECT draft FROM comics WHERE id=$1',['review-draft'])).rows[0].draft;
+      expect(claimed.panelReviews['panel-1'].assetId).toBe(image);
+      expect(claimed.panelFindings['panel-1'][0].severity).toBe('warning');
+      s.store.putAdvisoryReview('review-draft',guest.owner,`panel:panel-1:${image}:2:3`,{outcome:'pass',findings:[]});
+      await expect(importSqlite(args)).rejects.toThrow('different source data');
+    }finally{s.db.close();s.store.close();}
+  });
+  test('a stale or invalid advisory record cannot release a checking panel during import',async()=>{
+    const s=await source();try {
+      const guest=s.store.createGuest('creator2@example.test'),image=randomUUID();
+      s.store.create('stale-review-draft',guest.owner,{ownerId:guest.owner,storyRevision:2,pages:[{id:'page',panels:[{id:'panel',assetId:image,storyRevision:2,revision:3,status:'checking',evaluation:'uncertain'}]}]});
+      writeFileSync(join(s.assetPath,`${image}.png`),Buffer.from([137,80,78,71,13,10,26,10]));
+      s.store.putAdvisoryReview('stale-review-draft',guest.owner,`panel:panel:${image}:2:2`,{outcome:'pass',findings:[]});
+      s.store.putAdvisoryReview('stale-review-draft',guest.owner,`panel:panel:${image}:2:3`,{outcome:'pass',findings:'invalid'});
+      const batch='stale-review-batch';await importSqlite({pool,objects:s.objects,databasePath:s.path,assetPath:s.assetPath,batchId:batch});
+      const imported=(await pool.query('SELECT draft FROM comics WHERE id=$1',['stale-review-draft'])).rows[0].draft;
+      expect(imported.pages[0].panels[0].status).toBe('checking');
+      const hosted=new PostgresAuth(pool),target=await hosted.createGuest('target2@example.test'),cookie=`comex_session=${target.token}`;
+      const token=await proof(s,batch,`comex_session=${guest.token}`,cookie);
+      expect(await redeemImport({pool,identityStore:hosted,cookie,proof:token,origin,secret})).toBe(false);
+    }finally{s.db.close();s.store.close();}
+  });
   test('import stages terminal history, reservations and disconnected grant until the verified owner redeems it',async()=>{
     const s=await source();try {
       const guest=s.store.createGuest('source@example.test'),other=s.store.createGuest('other@example.test');

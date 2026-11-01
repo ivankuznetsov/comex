@@ -100,21 +100,33 @@ export class LocalStore {
       const existing=this.guestIdentity(token,now);if(existing){this.db.exec('COMMIT');return existing;}
       if(this.hasGuestToken(token) || !this.hasLegacyOwner(token)){this.db.exec('COMMIT');return null;}
       const active=this.db.prepare(`SELECT 1 FROM comics c WHERE c.owner=? AND (
-        EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state='running') OR
-        EXISTS(SELECT 1 FROM json_each(c.draft,'$.operations') o WHERE o.value='running') OR
-        EXISTS(SELECT 1 FROM json_each(c.draft,'$.pages') p, json_each(p.value,'$.panels') n WHERE json_extract(n.value,'$.status')='checking')) LIMIT 1`).get(token);
+        EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state IN ('running','unknown')) OR
+        EXISTS(SELECT 1 FROM page_jobs j WHERE j.comic_id=c.id AND j.state IN ('running','unknown')) OR
+        EXISTS(SELECT 1 FROM json_each(c.draft,'$.operations') o WHERE o.value IN ('running','unknown_outcome')) OR
+        EXISTS(SELECT 1 FROM json_each(c.draft,'$.pages') p, json_each(p.value,'$.panels') n
+          WHERE json_extract(n.value,'$.status')='checking' AND NOT EXISTS(
+            SELECT 1 FROM advisory_reviews a WHERE a.comic_id=c.id
+              AND json_extract(n.value,'$.storyRevision')=json_extract(c.draft,'$.storyRevision')
+              AND a.review_key='panel:'||json_extract(n.value,'$.id')||':'||json_extract(n.value,'$.assetId')||':'||json_extract(n.value,'$.storyRevision')||':'||json_extract(n.value,'$.revision')
+              AND CASE WHEN json_valid(a.result) THEN json_type(a.result,'$.findings')='array'
+                AND json_extract(a.result,'$.outcome') IN ('pass','findings','inconclusive','failed') ELSE 0 END
+          ))) LIMIT 1`).get(token);
       if(active)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
       const owner=randomBytes(32).toString('hex');
       this.transferOperations(token,owner);
       this.db.prepare('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES (?,?,?,?)').run(hash(token),owner,email,now+GUEST_TTL_MS);
       this.db.prepare(`UPDATE comics SET owner=?,draft=json_set(draft,'$.ownerId',?), edition=CASE WHEN edition IS NOT NULL AND json_extract(edition,'$.sourceRevision')=revision THEN json_set(edition,'$.sourceRevision',revision+1) ELSE edition END,revision=revision+1 WHERE owner=?`).run(owner,owner,token);
       this.db.prepare('UPDATE comic_text_operations SET owner=? WHERE owner=?').run(owner,token);
+      this.db.prepare('UPDATE page_jobs SET owner=? WHERE owner=?').run(owner,token);
       this.db.prepare('UPDATE mcp_grants SET owner=? WHERE owner=?').run(owner,token);
       this.db.exec('COMMIT');return {owner,email};
     }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
   updateGuestEmail(token:string,email:string,now=Date.now()): boolean {
     return Number(this.db.prepare('UPDATE auth_guests SET email=? WHERE token_hash=? AND expires_at>?').run(email,hash(token),now).changes)===1;
+  }
+  bindGuestEmail(token:string,email:string,now=Date.now()): boolean {
+    return Number(this.db.prepare("UPDATE auth_guests SET email=? WHERE token_hash=? AND expires_at>? AND email=''").run(email,hash(token),now).changes)===1;
   }
   issueCode(email:string, code:string, browser:string, secret:string, now=Date.now()): string | null {
     this.db.exec('BEGIN IMMEDIATE');
