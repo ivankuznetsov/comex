@@ -4,7 +4,7 @@ import {useEffect, useRef, type KeyboardEvent} from 'react';
 import {button, secondaryButton, Message} from './ComicShell';
 
 export type RevisionProposal = {
-  id:string; affectedPage:number; affectedPanel:number; explanation:string;
+  id:string; affectedPage:number; affectedPanel:number; explanation:string; instruction?:string;
   panels:{id:string;page:number;panel:number;previousAction:string;action:string;dialogue:{speaker:string;text:string}[]}[];
 };
 
@@ -44,7 +44,7 @@ export function RevisionPreview({proposal, busy, error, onDismiss, onApply}: {
         {panel.dialogue.length>0 && <ul className="mt-2 text-sm">{panel.dialogue.map((line,index)=><li key={index}><strong>{line.speaker}:</strong> {line.text}</li>)}</ul>}
       </li>)}</ol>
       {error && <div className="mt-4"><Message error>{error}</Message></div>}
-      <div className="mt-5 flex flex-wrap gap-3"><button data-revision-cancel type="button" className={secondaryButton} disabled={busy} onClick={onDismiss}>Cancel</button><button type="button" className={button} disabled={busy} onClick={onApply}>{busy?'Applying…':'Apply story change'}</button></div>
+      <p className="mt-4 text-sm">You can close this preview and return to it while the draft remains unchanged.</p><div className="mt-5 flex flex-wrap gap-3"><button data-revision-cancel type="button" className={secondaryButton} disabled={busy} onClick={onDismiss}>Close preview</button><button type="button" className={button} disabled={busy} onClick={onApply}>{busy?'Applying…':'Apply story change'}</button></div>
     </div>
   </dialog>;
 }
