@@ -29,6 +29,8 @@ export interface ComicDraft {
   plot: string;
   styleId: string;
   storyRevision: number;
+  /** Absent on older drafts; an approval always names the story that was inspected. */
+  storyApproval?: { storyRevision: number; fingerprint: string } | null;
   pages: Page[];
   published: PublishedEdition | null;
 }
@@ -132,7 +134,7 @@ export function reviseStory(comic: ComicDraft, ownerId: string, expectedRevision
       ...(panel.status === 'checking' ? {status:'needs_review' as const, evaluation:'uncertain' as const} : {}),
       acceptance: panel.acceptance ? { ...panel.acceptance, storyRevision: revision } : null }),
   }));
-  return { ...comic, pages, storyRevision: revision };
+  return { ...comic, pages, storyRevision: revision, storyApproval: null };
 }
 
 export function acceptPanel(comic: ComicDraft, ownerId: string, panelId: string, assetId: string,

@@ -200,6 +200,7 @@ export async function handleApi(request:NextRequest,segments:string[]) {
     if (segments[2] === 'questions' && segments.length === 3 && method === 'POST') return reply(await service.refreshQuestions(session,id,await body(),initial.revision));
     if (segments[2] === 'characters' && segments[3] === 'suggestions' && segments.length === 4 && method === 'POST') return reply(await service.suggestCharacters(session,id,await body(),initial.revision));
     if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') return reply(await service.acceptStoryReview(session,id,await body(),initial.revision));
+    if (segments[2] === 'story' && segments[3] === 'approve' && segments.length === 4 && method === 'POST') return reply(await service.approveStory(session,id,await body(),initial.revision));
     if (segments[2] === 'story' && segments[3] === 'plan' && segments.length === 4 && method === 'POST') return reply(await service.planStory(session,id,await body(),initial.revision));
     if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') return reply(await service.generateReference(session,id,segments[3],await body(),initial.revision));
     if (segments[2] === 'characters' && segments.length === 3 && method === 'POST') return reply(await service.addCharacter(session,id,await body(),initial.revision));

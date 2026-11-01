@@ -35,6 +35,44 @@ const bob = 'bob';
 const creation = {title:'The courier',plot:'A courier carries a key',style:'ink-manga'};
 
 describe('shared comic application', () => {
+  test('the inspected story must be approved before drawing and stale approvals cannot authorize changes', async () => {
+    const {local,service,files}=fixture();
+    try {
+      const id=(await service.create(alice,creation)).comic.id;
+      const reference=randomUUID(); files.set(reference,Buffer.from('reference'));
+      const record=local.getOwned<any>(id,alice)!;
+      const draft=createComic({id,ownerId:alice,title:creation.title,creatorName:'',plot:creation.plot,styleId:creation.style,
+        pages:[{id:'page1',panels:[{id:'p1',beat:'Find the key'}]}]});
+      const state={location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
+      const storyboard={bible:{premise:'Delivery',setting:'Town',rules:[],character_ids:['mina']},pages:[{index:1,panels:[{id:'p1',index:1,character_ids:['mina'],action:'Find the key',framing:'wide',dialogue:[{speaker_id:'mina',text:'The key'}],state_before:state,state_after:state}]}]};
+      local.update(id,alice,record.revision,{...record.data,...draft,storyboard,storyReview:{outcome:'pass',findings:[]},characters:[{id:'mina',name:'Mina',role:'courier',appearance:'hair',outfit:'coat',approved:true,referenceAssetId:reference}]});
+      const viewed=(await service.get(alice,id)).comic;
+      expect(viewed.storyboard?.pages[0].panels[0].dialogue[0].text).toBe('The key');
+      expect(viewed.storyApproval?.approved).toBe(false);
+      expect(viewed.nextActions).toContain('approve_story');
+      await expect(service.generatePage(alice,id,'page1')).rejects.toMatchObject({code:'conflict',message:expect.stringMatching(/approve.*story/i)});
+      const displayed={revision:viewed.revision,storyRevision:viewed.storyRevision,fingerprint:viewed.storyApproval!.fingerprint};
+      await service.update(alice,id,{title:'A different title'});
+      await expect(service.approveStory(alice,id,displayed)).rejects.toMatchObject({code:'conflict'});
+      const refreshed=(await service.get(alice,id)).comic;
+      expect((await service.approveStory(alice,id,{...displayed,revision:refreshed.revision})).comic.storyApproval?.approved).toBe(true);
+      const current=local.getOwned<any>(id,alice)!;
+      local.update(id,alice,current.revision,{...current.data,storyboard:{...storyboard,bible:{...storyboard.bible,premise:'Changed'}}});
+      expect((await service.get(alice,id)).comic.storyApproval?.approved).toBe(false);
+      await expect(service.approveStory(alice,id,displayed)).rejects.toMatchObject({code:'conflict'});
+      await expect(service.generatePage(alice,id,'page1')).rejects.toMatchObject({code:'conflict',message:expect.stringMatching(/approve.*story/i)});
+      const changedView=(await service.get(alice,id)).comic, changed=changedView.storyApproval!;
+      const approval={revision:changedView.revision,storyRevision:changed.storyRevision,fingerprint:changed.fingerprint};
+      const concurrent=await Promise.allSettled([service.approveStory(alice,id,approval),service.approveStory(alice,id,approval)]);
+      expect(concurrent.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+      expect(concurrent.filter(result => result.status === 'rejected')).toHaveLength(1);
+      const approved=local.getOwned<any>(id,alice)!;
+      local.update(id,alice,approved.revision,{...approved.data,characters:approved.data.characters.map((character:any) => ({...character,referenceAssetId:randomUUID(),approved:false}))});
+      expect((await service.get(alice,id)).comic.storyApproval?.approved).toBe(false);
+      await expect(service.approveStory(alice,id,approval)).rejects.toMatchObject({code:'conflict'});
+    } finally { local.close(); }
+  });
+
   test('async repository preserves guided questions, suggested answers and character suggestions for the same owner', async () => {
     const {local,service,inputs,calls} = fixture();
     try {
@@ -81,6 +119,38 @@ describe('shared comic application', () => {
     } finally { local.close(); }
   });
 
+  test('a stale revision cannot apply; confirming its full preview approves only the resulting legacy story', async () => {
+    const state={location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
+    const spec=(id:string,index:number,action:string) => ({id,index,character_ids:[],action,framing:'wide',dialogue:[{speaker_id:'mina',text:action}],state_before:state,state_after:state});
+    const bible={premise:'Delivery',setting:'Town',rules:[],character_ids:[]};
+    const storyboard={bible,pages:[{index:1,panels:[spec('p1',1,'Find the key'),spec('p2',2,'Give the key')]}]};
+    const finding={severity:'blocker',dimension:'story',panel_id:'p2',character_id:null,reference_id:null,expected:'key',observed:'missing key',repair:'fix'};
+    const {local,service}=fixture({
+      async revision() {return {earliest_affected_panel_id:'p2',explanation:'Keep the key',revised_bible:bible,revised_suffix:[spec('p2',2,'Keep the key')]};},
+      async narrativeJudge() {return {outcome:'findings',findings:[finding]};},
+    });
+    try {
+      const id=(await service.create(alice,creation)).comic.id;
+      const record=local.getOwned<any>(id,alice)!;
+      const draft=createComic({id,ownerId:alice,title:creation.title,creatorName:'',plot:creation.plot,styleId:creation.style,pages:[{id:'page1',panels:[{id:'p1',beat:'Find the key'},{id:'p2',beat:'Give the key'}]}]});
+      local.update(id,alice,record.revision,{...record.data,...draft,storyboard});
+      expect((await service.get(alice,id)).comic.storyApproval?.approved).toBe(false);
+      const first=(await service.previewRevision(alice,id,{panelId:'p2',instruction:'Keep the key'})).proposal;
+      expect(first.storyboard?.pages[0].panels.map(panel => panel.dialogue[0].text)).toEqual(['Find the key','Keep the key']);
+      await service.update(alice,id,{title:'Changed by another client'});
+      expect((await service.get(alice,id)).comic.pendingRevision?.current).toBe(false);
+      await expect(service.applyRevision(alice,id,{proposalId:first.id})).rejects.toMatchObject({code:'conflict'});
+      expect(local.getOwned<any>(id,alice)!.data.storyApproval).toBeUndefined();
+      const proposal=(await service.previewRevision(alice,id,{panelId:'p2',instruction:'Keep the key'})).proposal;
+      const applied=(await service.applyRevision(alice,id,{proposalId:proposal.id})).comic;
+      expect(applied.storyApproval).toMatchObject({storyRevision:2,approved:true});
+      expect(local.getOwned<any>(id,alice)!.data.storyApproval.storyRevision).toBe(2);
+      expect(applied.storyReview?.accepted).toBe(false);
+      expect(applied.nextSteps).toContainEqual({action:'accept_story_review',fingerprint:applied.storyReview!.fingerprint!,requiresConfirmation:true});
+      await expect(service.generatePage(alice,id,'page1')).rejects.toMatchObject({code:'conflict',message:expect.stringMatching(/blocker/i)});
+    } finally {local.close();}
+  });
+
   test('invalid inputs are rejected before storage or provider work', async () => {
     const {local,service,calls} = fixture();
     try {
@@ -115,7 +185,8 @@ describe('shared comic application', () => {
       const comic=createComic({id,ownerId:alice,title:creation.title,creatorName:'',plot:creation.plot,styleId:creation.style,
         pages:[{id:'page1',panels:panels.slice(0,2).map(p=>({id:p.id,beat:p.action}))},{id:'page2',panels:[{id:'p3',beat:panels[2].action}]}]});
       local.update(id,alice,record.revision,{...record.data,...comic,storyboard,characters:[{id:'mina',name:'Mina',role:'courier',appearance:'hair',outfit:'coat',approved:true,referenceAssetId:reference}]});
-
+      const storyView=(await service.get(alice,id)).comic, story=storyView.storyApproval!;
+      await service.approveStory(alice,id,{revision:storyView.revision,storyRevision:story.storyRevision,fingerprint:story.fingerprint});
       const paused=await service.generatePage(alice,id,'page1');
       expect('notice' in paused && paused.notice).toContain('paused');
       expect(imageCalls).toBe(1);
@@ -135,6 +206,15 @@ describe('shared comic application', () => {
       const edition=(await service.getPublished(id)).comic;
       const url=new URL(edition.pages[0].imageUrl,'http://localhost');
       const publicBytes=await service.getPublishedAsset(id,url.pathname.split('/').pop()!,url.searchParams.get('edition'));
+      const legacy=local.getOwned<any>(id,alice)!;
+      const {storyApproval:oldApproval,...legacyDraft}=legacy.data;
+      expect(oldApproval).toBeTruthy();
+      local.update(id,alice,legacy.revision,legacyDraft);
+      expect((await service.getPublished(id)).comic).toEqual(edition);
+      expect(await service.getPublishedAsset(id,url.pathname.split('/').pop()!,url.searchParams.get('edition'))).toEqual(publicBytes);
+      await expect(service.generatePage(alice,id,'page1')).rejects.toMatchObject({code:'conflict',message:expect.stringMatching(/approve.*story/i)});
+      const legacyView=(await service.get(alice,id)).comic;
+      await service.approveStory(alice,id,{revision:legacyView.revision,storyRevision:legacyView.storyRevision,fingerprint:legacyView.storyApproval!.fingerprint});
       await service.update(alice,id,{title:'Private revision'});
       expect((await service.getPublished(id)).comic).toEqual(edition);
       expect(await service.getPublishedAsset(id,url.pathname.split('/').pop()!,url.searchParams.get('edition'))).toEqual(publicBytes);
@@ -147,8 +227,11 @@ describe('shared comic application', () => {
       expect(edit.comic.pages[0].panels[1].reviewVersion?.assetId).not.toBe(beforeEdit.pages[0].panels[1].reviewVersion?.assetId);
       const proposal=await service.previewRevision(alice,id,{panelId:'p2',instruction:'Mina keeps the key'});
       expect(proposal.proposal).toMatchObject({earliestPanelId:'p2',affectedPage:1,affectedPanel:2});
+      expect(proposal.proposal.storyboard?.pages[0].panels.map(panel => panel.action)).toEqual(['Find the key','Keep the key']);
+      expect((await service.get(alice,id)).comic.pendingRevision).toEqual(proposal.proposal);
       const applied=await service.applyRevision(alice,id,{proposalId:proposal.proposal.id});
       expect(applied.comic.storyRevision).toBe(2);
+      expect(applied.comic.storyApproval?.approved).toBe(true);
       expect(applied.comic.pages[0].panels[0].reviewVersion?.assetId).toBe(originalFirst.reviewVersion?.assetId);
       expect(applied.comic.pages[0].panels[1].status).toBe('outdated');
       expect(applied.comic.pages[1].status).toBe('outdated');

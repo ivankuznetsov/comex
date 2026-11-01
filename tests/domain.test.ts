@@ -29,9 +29,10 @@ describe('comic domain', () => {
     expect(before.pages[0].composition?.assetId).toBe('page1-image');
   });
   test('story revision preserves prefix and invalidates remaining same-page panels and later pages', () => {
-    const before = fixture();
+    const before = {...fixture(),storyApproval:{storyRevision:1,fingerprint:'reviewed-story'}};
     const after = reviseStory(before, 'alice', 1, 'p2', { p2: 'Keep key', p3: 'Mina opens door' });
     expect(after.storyRevision).toBe(2);
+    expect(after.storyApproval).toBeNull();
     expect(after.pages[0].panels[0].assetId).toBe('a1');
     expect(after.pages[0].panels[0].status).toBe('current');
     expect(after.pages[0].panels[1].status).toBe('outdated');

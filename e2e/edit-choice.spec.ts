@@ -11,7 +11,7 @@ test('creator can clarify an ambiguous visual edit or preview a story change',as
     classified++;
     return route.fulfill({json:{editDecision:{intent:classified===1?'uncertain':'story',reason:'The scene may change.',panelId:'p1',reviewedVersion:version,...(classified===1?{proposalId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}:{})}}});
   });
-  await page.route('**/api/comics/test-comic/revisions/preview',async route=>{preview=route.request().postDataJSON();return route.fulfill({json:{proposal:{id:'proposal',affectedPage:1,affectedPanel:1,explanation:'The light changes.'}}});});
+  await page.route('**/api/comics/test-comic/revisions/preview',async route=>{preview=route.request().postDataJSON();return route.fulfill({json:{proposal:{id:'proposal',baseRevision:3,baseStoryRevision:1,current:true,earliestPanelId:'p1',affectedPage:1,affectedPageId:'page1',affectedPanel:1,explanation:'The light changes.',revisedBible:{premise:'A lighthouse',setting:'coast',rules:[],character_ids:[]},revisedSuffix:[],storyboard:{bible:{premise:'A lighthouse',setting:'coast',rules:[],character_ids:[]},pages:[{index:1,panels:[{id:'p1',index:1,action:'The light changes',dialogue:[]}]}]}}}});});
   await page.goto('/comics/test-comic');
   await page.getByLabel('Edit artwork').fill('Turn the lamp off');
   await page.getByRole('button',{name:'Regenerate panel'}).click();
@@ -24,8 +24,9 @@ test('creator can clarify an ambiguous visual edit or preview a story change',as
   await page.getByRole('button',{name:'Regenerate panel'}).click();
   await expect(page.getByText('This may change the story.')).toBeVisible();
   await expect(page.getByRole('button',{name:'Artwork only — story stays unchanged'})).toHaveCount(0);
-  page.once('dialog',dialog=>dialog.dismiss());
   await page.getByRole('button',{name:'Preview as story change'}).click();
   await expect.poll(()=>preview).toEqual({panelId:'p1',instruction:'Give the key to the sailor',reviewedVersion:version});
+  await expect(page.getByRole('region',{name:'Review story revision'}).getByText('The light changes', {exact:true})).toBeVisible();
+  await page.getByRole('region',{name:'Review story revision'}).getByRole('button',{name:'Cancel'}).click();
   await expect(page.getByText('Revision not applied.')).toBeVisible();
 });

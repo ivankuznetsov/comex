@@ -25,6 +25,12 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(page.getByText('Approved', { exact:true })).toBeVisible();
   await page.getByRole('button', { name: /Plan story/ }).click();
   await expect(page.getByText('Story review: pass')).toBeVisible();
+  await expect(page.getByRole('region',{name:'Story beats'}).getByText('Mina moves through scene 1-1')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Generate page',exact:true})).toBeDisabled();
+  await page.getByRole('button',{name:'Approve story',exact:true}).click();
+  await expect(page.getByText('Story approved for drawing.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Story approved for drawing.')).toBeVisible();
   const savedDraft = await page.request.get(new URL(page.url()).pathname.replace('/comics/', '/api/comics/'));
   const savedAnswers = (await savedDraft.json()).comic.answers as Record<string,string>;
   expect(Object.values(savedAnswers)).toContain('Deliver the key safely');
@@ -67,8 +73,10 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('img',{name:'Page 2, panel 2'}).click();
   const prefixBefore = await page.getByRole('img',{name:'Page 2, panel 1'}).getAttribute('src');
   await page.getByLabel('Change the story').fill('Mina takes the longer route');
-  page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button',{name:'Preview story change'}).click();
+  const revision=page.getByRole('region',{name:'Review story revision'});
+  await expect(revision.getByText('Revised Mina moves through scene 2-2')).toBeVisible();
+  await revision.getByRole('button',{name:'Apply story change and regenerate'}).click();
   await expect(page.getByText('Later pages remain outdated until you review the preceding page and generate them.')).toBeVisible({timeout:40_000});
   await expect(page.getByRole('img',{name:'Page 2, panel 1'})).toHaveAttribute('src', prefixBefore!);
   for (let j = 2; j <= 3; j++) {
