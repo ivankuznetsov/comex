@@ -311,7 +311,7 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
       assertOrigin(request);
       const character=initial.characters.find(item=>item.id===segments[3]);
       if(!character)throw new HttpError(404,'Character not found.');
-      if(character.lockedByStory)throw new HttpError(409,'This character is already in the story. Changing their reference requires revising the story.');
+      if(initial.pages.length)throw new HttpError(409,'Reference uploads are available before pages are planned.');
       if(character.referenceStatus === 'running' || character.referenceStatus === 'unknown_outcome')throw new HttpError(409,'This image request is already running or has an unknown outcome.');
       const form=await readReferenceForm(request), allowed=['image','appearance','outfit','expectedReferenceId','expectedCardVersion'];
       if([...form.keys()].some(key=>!allowed.includes(key)) || allowed.some(key=>form.getAll(key).length!==1))throw new HttpError(400,'Please provide one image and its character details.');

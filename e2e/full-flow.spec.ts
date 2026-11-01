@@ -32,6 +32,8 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByLabel('outfit',{exact:true}).fill('Dark coat');
   await page.getByRole('button',{name:'Add character',exact:true}).click();
   const oriel=page.locator('article').filter({has:page.getByRole('heading',{name:'Oriel'})});
+  await expect(oriel.getByRole('button',{name:'Upload reference'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Upload a reference for new character'})).toBeDisabled();
   await oriel.getByRole('button',{name:'Draw reference (AI call)'}).click();
   await expect(oriel.getByAltText('Reference for Oriel')).toBeVisible();
   await oriel.getByRole('button',{name:'Approve',exact:true}).click();

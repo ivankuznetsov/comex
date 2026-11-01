@@ -1038,7 +1038,7 @@ export function createComicService(deps: ComicDependencies) {
         const {data,revision}=await owned(session,id,expectedRevision);
         const character=data.characters.find(c=>c.id===itemId);
         if(!character)throw new ApplicationError('not_found','Character not found.');
-        if(characterUsedInStory(data,itemId))throw new ApplicationError('conflict','This character is already in the story. Changing their reference requires revising the story.');
+        if(data.pages.length)throw new ApplicationError('conflict','Reference uploads are available before pages are planned.');
         if(data.operations?.[`character:${itemId}`])throw new ApplicationError('conflict','This image request is already running or has an unknown outcome.');
         if(body.expectedReferenceId!==(character.referenceAssetId ?? '') || body.expectedCardVersion!==characterCardVersion(character))
             throw new ApplicationError('conflict','The character card or reference changed. Review it before trying again.');

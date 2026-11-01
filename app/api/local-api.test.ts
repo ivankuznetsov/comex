@@ -1356,3 +1356,20 @@ test('a separately reserved story operation blocks upload attachment without cha
     store.finishTextOperation(comic.id,owner,false);
   } finally {if(prior===undefined)delete process.env.COMEX_ASSET_PATH;else process.env.COMEX_ASSET_PATH=prior;await rm(dir,{recursive:true,force:true});}
 });
+
+test('an unused character cannot receive an uploaded reference after pages are planned', async () => {
+  const created=await post('comics',{title:'Planned upload',plot:'A lighthouse',style:'ink-manga'});
+  const {comic}=await created.json(),cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+  const added=await post(`comics/${comic.id}/characters`,{name:'Pip',role:'Keeper',appearance:'Hair',outfit:'Coat'},cookie);
+  const character=(await added.json()).comic.characters[0];
+  const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore,record=store.getOwned<any>(comic.id,owner)!;
+  const storyboard={bible:{premise:'A light',setting:'Lighthouse',rules:[],character_ids:[]},pages:[]};
+  expect(store.update(comic.id,owner,record.revision,{...record.data,storyboard,pages:[{id:'planned',panels:[]}]})).toBe(true);
+  const viewed=await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id]);
+  expect((await viewed.json()).comic.characters[0].lockedByStory).toBe(false);
+  const form=new FormData();form.set('image',new File([new Uint8Array([1])],'pip.png',{type:'image/png'}));form.set('appearance','Hair');form.set('outfit','Coat');form.set('expectedReferenceId','');form.set('expectedCardVersion',character.cardVersion);
+  const path=`comics/${comic.id}/characters/${character.id}/reference/upload`;
+  const response=await handleApi(new NextRequest(`http://localhost:3000/api/${path}`,{method:'POST',headers:{cookie},body:form}),path.split('/'));
+  expect(response.status).toBe(409);expect((await response.json()).error).toContain('before pages are planned');
+  expect(store.getOwned<any>(comic.id,owner)!.data.characters[0].referenceAssetId).toBeUndefined();
+});
