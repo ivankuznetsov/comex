@@ -22,7 +22,7 @@ export class PostgresAuth {
         AND EXISTS(SELECT 1 FROM operation_checkpoints cp WHERE cp.operation_id=o.id AND cp.checkpoint_key='operator/abandoned-unknown-suggestions'
           AND cp.value_json::jsonb->>'decision'='continue_without_suggestion' AND cp.value_json::jsonb->>'providerOutcome'='unknown')
         AND EXISTS(SELECT 1 FROM operation_dispatch_intents d WHERE d.operation_id=o.id AND d.state='delivered' AND (d.lease_token IS NULL OR d.lease_until<=floor(extract(epoch FROM clock_timestamp())*1000)))
-        AND EXISTS(SELECT 1 FROM operation_steps s JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND s.step_id='suggestions' AND s.state='unknown' AND r.state='unknown')
+        AND EXISTS(SELECT 1 FROM operation_steps s JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND s.step_id='suggestions' AND s.state='unknown' AND (s.result_json IS NULL OR s.result_json='null') AND r.state='unknown')
         AND NOT EXISTS(SELECT 1 FROM operation_steps s WHERE s.operation_id=o.id AND s.step_id<>'suggestions')
         AND NOT EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.operation_id=o.id)) LIMIT 1`,[source]);
     if(active.rowCount)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');

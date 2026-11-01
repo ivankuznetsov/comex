@@ -78,8 +78,8 @@ export async function abandonSuggestions(pool:Pool,operationId:string):Promise<v
       throw new ReconciliationError('The operation is not available for abandonment.');
     const dispatch=(await client.query('SELECT * FROM operation_dispatch_intents WHERE operation_id=$1 FOR UPDATE',[operationId])).rows[0];
     if(!dispatch || dispatch.state!=='delivered' || (dispatch.lease_token && (dispatch.lease_until===null || Number(dispatch.lease_until)>now)))throw new ReconciliationError('The operation is not available for abandonment.');
-    const steps=await client.query('SELECT s.step_id,s.state,r.state AS reservation_state FROM operation_steps s JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=$1 FOR UPDATE OF s,r',[operationId]);
-    if(steps.rowCount!==1 || steps.rows[0].step_id!=='suggestions' || steps.rows[0].state!=='unknown' || steps.rows[0].reservation_state!=='unknown')throw new ReconciliationError('The operation is not available for abandonment.');
+    const steps=await client.query('SELECT s.step_id,s.state,s.result_json,r.state AS reservation_state FROM operation_steps s JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=$1 FOR UPDATE OF s,r',[operationId]);
+    if(steps.rowCount!==1 || steps.rows[0].step_id!=='suggestions' || steps.rows[0].state!=='unknown' || steps.rows[0].reservation_state!=='unknown' || ![null,'null'].includes(steps.rows[0].result_json))throw new ReconciliationError('The operation is not available for abandonment.');
     const lock=(await client.query('SELECT owner,state,operation_id FROM comic_text_operations WHERE comic_id=$1 FOR UPDATE',[comic.id])).rows[0];
     if(!lock || lock.owner!==operation.owner || lock.state!=='unknown' || lock.operation_id!==operationId)throw new ReconciliationError('The operation is not available for abandonment.');
     const competing=await client.query("SELECT 1 FROM operations WHERE target_id=$1 AND id<>$2 AND status IN ('queued','running','unknown_outcome') LIMIT 1",[comic.id,operationId]);

@@ -115,6 +115,8 @@ suite('operator reconciliation (Postgres)',()=>{
     await pool.query('UPDATE comic_text_operations SET operation_id=$2 WHERE comic_id=$1',[comicId,op.id]);
     await pool.query("UPDATE provider_reservations SET state='completed' WHERE id=(SELECT reservation_id FROM operation_steps WHERE operation_id=$1)",[op.id]);await reject();
     await pool.query("UPDATE provider_reservations SET state='unknown' WHERE id=(SELECT reservation_id FROM operation_steps WHERE operation_id=$1)",[op.id]);
+    await pool.query("UPDATE operation_steps SET result_json='{\"retained\":true}' WHERE operation_id=$1",[op.id]);await reject();
+    await pool.query("UPDATE operation_steps SET result_json='null' WHERE operation_id=$1",[op.id]);
     const extraReservation=randomUUID();await pool.query("INSERT INTO provider_reservations(id,state,created_at,updated_at) VALUES($1,'unknown','now','now')",[extraReservation]);
     await pool.query("INSERT INTO operation_steps(operation_id,step_id,input_digest,state,reservation_id) VALUES($1,'extra','digest','unknown',$2)",[op.id,extraReservation]);await reject();
     await pool.query("DELETE FROM operation_steps WHERE operation_id=$1 AND step_id='extra'",[op.id]);await pool.query('DELETE FROM provider_reservations WHERE id=$1',[extraReservation]);
