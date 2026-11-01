@@ -9,11 +9,18 @@
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests app/api/local-api.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "mcp:auth:migrate": "bun src/lib/auth/migrate.ts",
+    "mcp:register-import": "bun src/lib/auth/register-import.ts",
+    "test:cimd": "node --experimental-test-module-mocks tests/cimd-node-smoke.mjs"
   },
   "dependencies": {
+    "@better-auth/cimd": "1.7.15",
+    "@better-auth/mcp": "1.7.15",
+    "@better-auth/oauth-provider": "1.7.15",
     "@fontsource/bangers": "5.3.0",
     "@vercel/blob": "^2.8.2",
+    "better-auth": "1.7.15",
     "next": "16.4.3",
     "openai": "7.47.0",
     "pg": "^8.23.1",
