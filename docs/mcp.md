@@ -23,6 +23,8 @@ Dot can use supported plugins installed and enabled for your account, subject to
 
 Ask the assistant to start or continue a comic. It should use the same saved questions, suggested answers, character cards, story, and review choices as the Comex editor. The questions are generated for the draft and are not automatically answered. Review references, story beats, and panel findings before explicitly approving or accepting the displayed version. A refreshed draft may require a new approval.
 
+Review findings are advisory. The local editor runs reviews in the background; a hosted generation operation currently waits for its review before completing.
+
 Generation may continue after a conversation disconnects. Resume by checking the existing operation instead of requesting a replacement. Export is private; publishing or withdrawing an edition is a separate explicit action. The editor remains available for reviewing an image if your client cannot display it.
 
 ## Connections and verification

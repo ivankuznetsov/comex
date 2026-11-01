@@ -6,6 +6,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const GUEST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export class ClaimInProgressError extends Error {}
+export type PageJob = {id:string; comicId:string; pageId:string; owner:string; state:'running'|'completed'|'paused'|'failed'|'unknown'; message:string | null; createdAt:number};
 
 /** Single-node local development store. Replace with managed persistence for deployment. */
 export class LocalStore {
@@ -25,6 +26,16 @@ export class LocalStore {
       CREATE TABLE IF NOT EXISTS comic_text_operations (
         comic_id TEXT PRIMARY KEY, owner TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('running', 'unknown'))
+      );
+      CREATE TABLE IF NOT EXISTS page_jobs (
+        id TEXT PRIMARY KEY, comic_id TEXT NOT NULL, page_id TEXT NOT NULL, owner TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('running','completed','paused','failed','unknown')),
+        message TEXT, created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS active_page_job ON page_jobs(comic_id) WHERE state IN ('running','unknown');
+      CREATE TABLE IF NOT EXISTS advisory_reviews (
+        comic_id TEXT NOT NULL, review_key TEXT NOT NULL, result TEXT NOT NULL,
+        PRIMARY KEY(comic_id,review_key)
       );
       CREATE TABLE IF NOT EXISTS auth_users (email TEXT PRIMARY KEY, owner TEXT NOT NULL UNIQUE);
       CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -154,14 +165,15 @@ export class LocalStore {
       if (anonymousOwner && sameBrowser) {
         const active=this.db.prepare(`SELECT 1 FROM comics c WHERE c.owner=? AND (
           EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state='running') OR
-          EXISTS(SELECT 1 FROM json_each(c.draft,'$.operations') o WHERE o.value='running') OR
-          EXISTS(SELECT 1 FROM json_each(c.draft,'$.pages') p, json_each(p.value,'$.panels') n WHERE json_extract(n.value,'$.status')='checking')
+          EXISTS(SELECT 1 FROM page_jobs j WHERE j.comic_id=c.id AND j.state IN ('running','unknown')) OR
+          EXISTS(SELECT 1 FROM json_each(c.draft,'$.operations') o WHERE o.value='running')
         ) LIMIT 1`).get(anonymousOwner);
         if (active) throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try signing in again.');
         this.transferOperations(anonymousOwner,owner);
         this.db.prepare(`UPDATE comics SET owner=?,draft=json_set(draft,'$.ownerId',?), edition=CASE WHEN edition IS NOT NULL AND json_extract(edition,'$.sourceRevision')=revision THEN json_set(edition,'$.sourceRevision',revision+1) ELSE edition END,revision=revision+1 WHERE owner=?`).run(owner,owner,anonymousOwner);
         this.db.prepare('UPDATE comic_text_operations SET owner=? WHERE owner=?').run(owner,anonymousOwner);
         this.db.prepare('UPDATE mcp_grants SET owner=? WHERE owner=?').run(owner,anonymousOwner);
+        this.db.prepare('UPDATE page_jobs SET owner=? WHERE owner=?').run(owner,anonymousOwner);
         this.db.prepare('DELETE FROM auth_guests WHERE owner=?').run(anonymousOwner);
       }
       const session=randomBytes(32).toString('hex');
@@ -182,6 +194,11 @@ export class LocalStore {
     const row = this.db.prepare('SELECT revision,draft FROM comics WHERE id=? AND owner=?').get(id, owner) as {revision: number; draft: string} | undefined;
     return row ? { revision: Number(row.revision), data: JSON.parse(row.draft) as T } : null;
   }
+  /** Internal background work may finish after a verified guest draft is claimed. */
+  getReviewTarget<T = unknown>(id:string):{owner:string;revision:number;data:T}|null {
+    const row=this.db.prepare('SELECT owner,revision,draft FROM comics WHERE id=?').get(id) as {owner:string;revision:number;draft:string}|undefined;
+    return row ? {owner:row.owner,revision:Number(row.revision),data:JSON.parse(row.draft) as T} : null;
+  }
   listOwned<T = unknown>(owner: string): T[] {
     const rows = this.db.prepare('SELECT draft FROM comics WHERE owner=? ORDER BY rowid DESC').all(owner) as {draft: string}[];
     return rows.map(row => JSON.parse(row.draft) as T);
@@ -189,10 +206,52 @@ export class LocalStore {
   update(id: string, owner: string, revision: number, data: unknown): boolean {
     return Number(this.db.prepare('UPDATE comics SET draft=?,revision=revision+1 WHERE id=? AND owner=? AND revision=?').run(JSON.stringify(data), id, owner, revision).changes) === 1;
   }
+  /** Reviews are version-keyed metadata and never alter the creator's draft revision. */
+  putAdvisoryReview(id:string, owner:string, key:string, result:unknown): boolean {
+    return Number(this.db.prepare(`INSERT INTO advisory_reviews(comic_id,review_key,result)
+      SELECT id,?,? FROM comics WHERE id=? AND owner=?
+      ON CONFLICT(comic_id,review_key) DO UPDATE SET result=excluded.result`).run(key,JSON.stringify(result),id,owner).changes) === 1;
+  }
+  getAdvisoryReview<T=unknown>(id:string,key:string):T|null {
+    const row=this.db.prepare('SELECT result FROM advisory_reviews WHERE comic_id=? AND review_key=?').get(id,key) as {result:string}|undefined;
+    return row ? JSON.parse(row.result) as T : null;
+  }
   /** Atomically reserve all story-related provider work for the unchanged draft. */
   reserveTextOperation(id: string, owner: string, revision: number): boolean {
     return Number(this.db.prepare(`INSERT OR IGNORE INTO comic_text_operations(comic_id,owner,state)
-      SELECT id,owner,'running' FROM comics WHERE id=? AND owner=? AND revision=?`).run(id,owner,revision).changes) === 1;
+      SELECT id,owner,'running' FROM comics WHERE id=? AND owner=? AND revision=?
+      AND NOT EXISTS (SELECT 1 FROM page_jobs j WHERE j.comic_id=comics.id AND j.state IN ('running','unknown'))`).run(id,owner,revision).changes) === 1;
+  }
+  pageJob(id:string, owner:string, pageId:string, requestId?:string):PageJob|null {
+    const suffix=requestId ? ' AND id=?' : '';
+    const sql=`SELECT id,comic_id AS comicId,page_id AS pageId,owner,state,message,created_at AS createdAt FROM page_jobs WHERE comic_id=? AND owner=? AND page_id=?${suffix} ORDER BY created_at DESC,rowid DESC LIMIT 1`;
+    const args=requestId ? [id,owner,pageId,requestId] : [id,owner,pageId];
+    return (this.db.prepare(sql).get(...args) as PageJob|undefined) ?? null;
+  }
+  hasActivePageJob(id:string,owner:string):boolean {
+    return !!this.db.prepare("SELECT 1 FROM page_jobs WHERE comic_id=? AND owner=? AND state IN ('running','unknown') LIMIT 1").get(id,owner);
+  }
+  activePageJob(id:string,owner:string):PageJob|null {
+    return (this.db.prepare("SELECT id,comic_id AS comicId,page_id AS pageId,owner,state,message,created_at AS createdAt FROM page_jobs WHERE comic_id=? AND owner=? AND state IN ('running','unknown') LIMIT 1").get(id,owner) as PageJob|undefined) ?? null;
+  }
+  /** Idempotency key and active-job reservation are checked in the same write transaction. */
+  beginPageJob(id:string,owner:string,pageId:string,requestId:string,revision:number):{job:PageJob;created:boolean}|null {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const prior=this.pageJob(id,owner,pageId,requestId);
+      if (prior) {this.db.exec('COMMIT');return {job:prior,created:false};}
+      const active=this.db.prepare("SELECT id FROM page_jobs WHERE comic_id=? AND state IN ('running','unknown')").get(id) as {id:string}|undefined;
+      if (active) {this.db.exec('COMMIT');return null;}
+      const eligible=this.db.prepare(`SELECT 1 FROM comics c WHERE id=? AND owner=? AND revision=?
+        AND NOT EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state IN ('running','unknown'))`).get(id,owner,revision);
+      if (!eligible) {this.db.exec('COMMIT');return null;}
+      this.db.prepare("INSERT INTO page_jobs(id,comic_id,page_id,owner,state,message,created_at) VALUES(?,?,?,?,'running',NULL,?)").run(requestId,id,pageId,owner,Date.now());
+      const job=this.pageJob(id,owner,pageId,requestId)!;
+      this.db.exec('COMMIT');return {job,created:true};
+    } catch(error) {this.db.exec('ROLLBACK');throw error;}
+  }
+  finishPageJob(id:string,owner:string,state:'completed'|'paused'|'failed'|'unknown',message:string|null):void {
+    if (Number(this.db.prepare("UPDATE page_jobs SET state=?,message=? WHERE id=? AND owner=? AND state='running'").run(state,message,id,owner).changes)!==1) throw new Error('Page job could not be finalized.');
   }
   finishTextOperation(id: string, owner: string, unknown: boolean): void {
     if (unknown) this.db.prepare("UPDATE comic_text_operations SET state='unknown' WHERE comic_id=? AND owner=? AND state='running'").run(id,owner);

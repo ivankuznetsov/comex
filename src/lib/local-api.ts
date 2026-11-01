@@ -3,11 +3,13 @@ import {resolve} from 'node:path';
 import {mkdir, open, readFile, unlink} from 'node:fs/promises';
 import {NextRequest, NextResponse} from 'next/server';
 import {z} from 'zod';
-import {createAIService, AIError} from './ai/service';
-import {LocalStore, ClaimInProgressError} from './local-store';
+import {createAIService, AIError, type Reference, type Storyboard} from './ai/service';
+import {LocalStore, ClaimInProgressError, type PageJob} from './local-store';
 import {createBudgetedFetch, BudgetError} from './budget';
 import {createComicService} from './application/comics';
-import {ApplicationError, createSchema, parse} from './application/contracts';
+import {ApplicationError, createSchema, parse, type Draft} from './application/contracts';
+import {sameJson} from './application/json';
+import {isPanelReady, type Panel} from './domain/comic';
 import type {PostgresAuth} from './storage/auth';
 export {validateStoryLedger} from './application/comics';
 
@@ -15,6 +17,9 @@ class HttpError extends Error { constructor(readonly status:number, message:stri
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
 function reply(data: unknown, status = 200) { return NextResponse.json(data, {status, headers: {'Cache-Control': 'no-store'}}); }
+function publicPageJob(job:PageJob|null) {
+  return job ? {id:job.id,pageId:job.pageId,state:job.state,message:job.message,createdAt:job.createdAt} : null;
+}
 type BrowserAuthStore = LocalStore | PostgresAuth;
 export type BrowserBackend = {
   auth: BrowserAuthStore;
@@ -79,11 +84,58 @@ function ensureLocal(request: NextRequest) {
   const validHost = ['localhost','127.0.0.1','[::1]'].includes(parsedHost.hostname) && !parsedHost.username && !parsedHost.password && parsedHost.host === rawHost && parsedHost.port === request.nextUrl.port;
   if (process.env.VERCEL || !validHost) throw new HttpError(403, 'Local storage is available only on localhost.');
 }
+function panelReviewKey(panel:Panel):string {return `panel:${panel.id}:${panel.assetId}:${panel.storyRevision}:${panel.revision}`;}
+function advisoryProvider() {
+  return createAIService({fetch:createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))});
+}
+function scheduleNarrativeReview(store:LocalStore,draft:Draft) {
+  const runId=(draft as Draft & {storyReviewRunId?:string}).storyReviewRunId,storyboard=draft.storyboard;
+  if(!runId || !storyboard)return;
+  void (async()=>{
+    let review:unknown;
+    try {
+      const answers=Object.fromEntries(draft.questions.filter(question=>draft.answers[question.id]?.trim()).map(question=>[question.question,draft.answers[question.id].trim()]));
+      review=await advisoryProvider().narrativeJudge({creatorGoal:draft.plot,answers,bible:storyboard.bible,beats:storyboard.pages});
+    } catch {review={outcome:'failed',findings:[]};}
+    const latest=store.getReviewTarget<Draft & {storyReviewRunId?:string}>(draft.id);
+    if(!latest || latest.data.storyReviewRunId!==runId || latest.data.storyRevision!==draft.storyRevision || !sameJson(latest.data.storyboard,storyboard))return;
+    store.putAdvisoryReview(draft.id,latest.owner,`story:${runId}:${draft.storyRevision}`,review);
+  })().catch(()=>{});
+}
+function scheduleVisualReview(store:LocalStore,input:{draft:Draft;panelId:string;assetId:string;panelRevision:number;bible:Storyboard['bible'];styleRules:string;beats:Omit<Storyboard['pages'][number]['panels'][number],'dialogue'>;references:Reference[]}) {
+  void (async()=>{
+    let findings:unknown[]=[],outcome='failed';
+    try {
+      const result=await advisoryProvider().visualJudge({bible:input.bible,styleRules:input.styleRules,beats:input.beats,references:[...input.references,{role:'generated panel',id:input.panelId,bytes:await asset(input.assetId),mimeType:'image/png'}]});
+      findings=result.findings;outcome=result.outcome;
+    } catch { /* Retain the generated image with an incomplete review. */ }
+    const latest=store.getReviewTarget<Draft>(input.draft.id);
+    if(!latest || latest.data.storyRevision!==input.draft.storyRevision)return;
+    const panel=latest.data.pages.flatMap(page=>page.panels).find(item=>item.id===input.panelId);
+    if(!panel || panel.assetId!==input.assetId || panel.storyRevision!==input.draft.storyRevision || panel.revision!==input.panelRevision || panel.status!=='checking')return;
+    store.putAdvisoryReview(input.draft.id,latest.owner,panelReviewKey(panel),{outcome,findings});
+  })().catch(()=>{});
+}
+function localResult<T>(result:T,store:LocalStore,owner:string,id:string):T {
+  if(!result || typeof result!=='object' || !('comic' in result))return result;
+  const comic=(result as {comic:any}).comic,record=store.getOwned<Draft & {storyReviewRunId?:string}>(id,owner);
+  if(!comic || !record)return result;
+  const draft=record.data,story=draft.storyReviewRunId ? store.getAdvisoryReview<{outcome:string;findings:unknown[]}>(id,`story:${draft.storyReviewRunId}:${draft.storyRevision}`) : null;
+  const pages=comic.pages.map((page:any)=>({...page,panels:page.panels.map((projected:any)=>{
+    const panel=draft.pages.flatMap(item=>item.panels).find(item=>item.id===projected.id);
+    if(!panel)return projected;
+    const review=panel.assetId && panel.storyRevision===draft.storyRevision && panel.status!=='outdated' ? store.getAdvisoryReview<{outcome:string;findings:{severity?:string}[]}>(id,panelReviewKey(panel)) : null;
+    return {...projected,ready:panel.storyRevision===draft.storyRevision && isPanelReady(panel) && !draft.operations?.[`panel:${panel.id}`],...(review ? {status:panel.status==='checking'?'needs_review':projected.status,evaluation:review.findings.some(f=>f.severity==='blocker')?'blocker':review.findings.some(f=>f.severity==='warning')?'warning':projected.evaluation,reviewOutcome:review.outcome,findings:review.findings} : {})};
+  })}));
+  return {...result,comic:{...comic,activePageJob:publicPageJob(store.activePageJob(id,owner)),...(story?{storyReview:{...story,fingerprint:comic.storyReview?.fingerprint??null,accepted:false}}:{}),pages}} as T;
+}
 function serviceFor(store:LocalStore) {
-  return createComicService({
+  const dependencies={
     repository:store, assets:{read:asset,save:saveAsset,discard:discardAsset}, provider:createAIService, id:randomUUID,
-    budgetFetch:(input,init) => createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))(input,init),
-  });
+    budgetFetch:(input:string|URL|Request,init?:RequestInit) => createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))(input,init),
+    advisory:{narrative:(draft:Draft)=>scheduleNarrativeReview(store,draft),visual:(input:Parameters<typeof scheduleVisualReview>[1])=>scheduleVisualReview(store,input)},
+  };
+  return createComicService(dependencies);
 }
 function imageResponse(bytes:Uint8Array, filename?:string) {
   return new NextResponse(new Uint8Array(bytes),{headers:{'Content-Type':'image/png',...(filename ? {'Content-Disposition':`attachment; filename="comex-page-${encodeURIComponent(filename)}.png"`} : {}),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
@@ -209,31 +261,71 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     if (segments.length < 2) throw new HttpError(404,'Not found.');
     const id=segments[1], session=await owner(request,store);
     if (!session) throw new HttpError(404,'Comic not found.');
-    if (segments.length === 2 && method === 'GET') return reply(await service.get(session,id));
-    const {comic: initial} = await service.get(session,id);
+    if (segments.length === 2 && method === 'GET') {
+      const result=await service.get(session,id);
+      return reply(backend ? result : localResult(result,store as LocalStore,session,id));
+    }
+    const current=await service.get(session,id);
+    const {comic:initial}=backend ? current : localResult(current,store as LocalStore,session,id);
+    const respond=<T>(result:T,status=200)=>reply(backend ? result : localResult(result,store as LocalStore,session,id),status);
+    const pageStart=segments[2]==='pages' && segments.length===5 && ['generate','generate-async'].includes(segments[4]);
+    const draftPatch=method==='PATCH' && segments.length===2;
+    if(!backend && ['POST','PATCH','DELETE'].includes(method) && !pageStart && !draftPatch && (store as LocalStore).hasActivePageJob(id,session))
+      throw new HttpError(409,'Wait for the page job to finish or resolve its unknown outcome before changing this draft.');
     if (segments[2] === 'assets' && segments.length === 4 && method === 'GET') return imageResponse(await service.getAsset(session,id,segments[3]));
     if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'download' && method === 'GET') return imageResponse(await service.downloadPage(session,id,segments[3],initial.revision),segments[3]);
     const body = async () => input(request,z.unknown());
-    if (segments.length === 2 && method === 'PATCH') return reply(await service.update(session,id,await body(),initial.revision));
-    if (segments[2] === 'questions' && segments[3] === 'initial' && segments.length === 4 && method === 'POST') return reply(await service.initialQuestions(session,id,await body(),initial.revision));
-    if (segments[2] === 'questions' && segments.length === 3 && method === 'POST') return reply(await service.refreshQuestions(session,id,await body(),initial.revision));
-    if (segments[2] === 'characters' && segments[3] === 'suggestions' && segments.length === 4 && method === 'POST') return reply(await service.suggestCharacters(session,id,await body(),initial.revision));
-    if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') return reply(await service.acceptStoryReview(session,id,await body(),initial.revision));
-    if (segments[2] === 'story' && segments[3] === 'approve' && segments.length === 4 && method === 'POST') return reply(await service.approveStory(session,id,await body(),initial.revision));
-    if (segments[2] === 'story' && segments[3] === 'plan' && segments.length === 4 && method === 'POST') return reply(await service.planStory(session,id,await body(),initial.revision));
-    if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') return reply(await service.generateReference(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'characters' && segments.length === 3 && method === 'POST') return reply(await service.addCharacter(session,id,await body(),initial.revision));
-    if (segments[2] === 'characters' && segments.length === 4 && method === 'PATCH') return reply(await service.editCharacter(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'characters' && segments.length === 4 && method === 'DELETE') return reply(await service.removeCharacter(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'approve' && method === 'POST') return reply(await service.approveCharacter(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'revisions' && segments[3] === 'preview' && segments.length === 4 && method === 'POST') return reply(await service.previewRevision(session,id,await body(),initial.revision));
-    if (segments[2] === 'revisions' && segments.length === 3 && method === 'POST') return reply(await service.applyRevision(session,id,await body(),initial.revision));
-    if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'generate' && method === 'POST') return reply(await service.generatePage(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'edit' && method === 'POST') return reply(await service.editPanel(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'accept' && method === 'POST') return reply(await service.acceptPanel(session,id,segments[3],await body(),initial.revision));
-    if (segments[2] === 'publish' && segments.length === 3 && method === 'POST') return reply(await service.publish(session,id,await body(),initial.revision));
-    if (segments[2] === 'unpublish' && segments.length === 3 && method === 'POST') return reply(await service.withdraw(session,id,await body(),initial.revision));
-    if (method === 'POST') { assertMutation(request); throw new HttpError(503,'AI generation is not configured yet. Add an OpenAI API key to the local environment and complete the AI integration.'); }
+    if (segments.length === 2 && method === 'PATCH') return respond(await service.update(session,id,await body(),initial.revision));
+    if (segments[2] === 'questions' && segments[3] === 'initial' && segments.length === 4 && method === 'POST') return respond(await service.initialQuestions(session,id,await body(),initial.revision));
+    if (segments[2] === 'questions' && segments.length === 3 && method === 'POST') return respond(await service.refreshQuestions(session,id,await body(),initial.revision));
+    if (segments[2] === 'characters' && segments[3] === 'suggestions' && segments.length === 4 && method === 'POST') return respond(await service.suggestCharacters(session,id,await body(),initial.revision));
+    if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') return respond(await service.acceptStoryReview(session,id,await body(),initial.revision));
+    if (segments[2] === 'story' && segments[3] === 'approve' && segments.length === 4 && method === 'POST') return respond(await service.approveStory(session,id,await body(),initial.revision));
+    if (segments[2] === 'story' && segments[3] === 'plan' && segments.length === 4 && method === 'POST') return respond(await service.planStory(session,id,await body(),initial.revision));
+    if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') return respond(await service.generateReference(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'characters' && segments.length === 3 && method === 'POST') return respond(await service.addCharacter(session,id,await body(),initial.revision));
+    if (segments[2] === 'characters' && segments.length === 4 && method === 'PATCH') return respond(await service.editCharacter(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'characters' && segments.length === 4 && method === 'DELETE') return respond(await service.removeCharacter(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'approve' && method === 'POST') return respond(await service.approveCharacter(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'revisions' && segments[3] === 'preview' && segments.length === 4 && method === 'POST') return respond(await service.previewRevision(session,id,await body(),initial.revision));
+    if (segments[2] === 'revisions' && segments.length === 3 && method === 'POST') return respond(await service.applyRevision(session,id,await body(),initial.revision));
+    if (!backend && segments[2]==='pages' && segments.length===5 && segments[4]==='job' && method==='GET') {
+      const requestId=request.nextUrl.searchParams.get('id') ?? undefined;
+      if(requestId && !z.string().uuid().safeParse(requestId).success)throw new HttpError(400,'Invalid page job.');
+      return reply({job:publicPageJob((store as LocalStore).pageJob(id,session,segments[3],requestId)),comic:initial});
+    }
+    if (!backend && pageStart && method==='POST') {
+      const local=store as LocalStore,asynchronous=segments[4]==='generate-async';
+      const payload=asynchronous ? await input(request,z.object({requestId:z.string().uuid(),expectedRevision:z.number().int().positive()}).strict()) : await input(request,z.object({}).strict());
+      const requestId=asynchronous ? (payload as {requestId:string;expectedRevision:number}).requestId : randomUUID();
+      const expected=asynchronous ? (payload as {requestId:string;expectedRevision:number}).expectedRevision : initial.revision;
+      const previous=local.pageJob(id,session,segments[3],requestId);
+      if(previous)return reply({job:publicPageJob(previous),comic:initial},previous.state==='running'?202:200);
+      if(!initial.pages.some(page=>page.id===segments[3]))throw new HttpError(404,'Page not found.');
+      const reservation=local.beginPageJob(id,session,segments[3],requestId,expected);
+      if(!reservation)throw new HttpError(409,'The page is already drawing, needs recovery, or the draft changed. Refresh and try again.');
+      if(!reservation.created)return reply({job:publicPageJob(reservation.job),comic:initial},reservation.job.state==='running'?202:200);
+      const work=async()=>{
+        try {
+          const result=await service.generatePage(session,id,segments[3],{},expected);
+          local.finishPageJob(requestId,session,result.notice?'paused':'completed',result.notice??null);
+          return result;
+        } catch(error) {
+          const unknown=error instanceof AIError && (error.code==='unknown_outcome'||error.code==='invalid_response');
+          const message=error instanceof HttpError || error instanceof ApplicationError || error instanceof AIError || error instanceof BudgetError ? error.message : 'Page generation failed. Refresh the draft to inspect its progress.';
+          local.finishPageJob(requestId,session,unknown?'unknown':'failed',message);throw error;
+        }
+      };
+      if(!asynchronous)return respond(await work());
+      void work().catch(()=>{});
+      return reply({job:publicPageJob(reservation.job),comic:initial},202);
+    }
+    if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'generate' && method === 'POST') return respond(await service.generatePage(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'edit' && method === 'POST') return respond(await service.editPanel(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'accept' && method === 'POST') return respond(await service.acceptPanel(session,id,segments[3],await body(),initial.revision));
+    if (segments[2] === 'publish' && segments.length === 3 && method === 'POST') return respond(await service.publish(session,id,await body(),initial.revision));
+    if (segments[2] === 'unpublish' && segments.length === 3 && method === 'POST') return respond(await service.withdraw(session,id,await body(),initial.revision));
+    if (method === 'POST') assertMutation(request);
     throw new HttpError(404,'Not found.');
   } catch (error) {
     if (error instanceof HttpError) return reply({error:error.message},error.status);

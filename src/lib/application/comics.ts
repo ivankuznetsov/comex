@@ -3,10 +3,10 @@ import sharp from 'sharp';
 import { AIError, type Storyboard, type Reference } from '../ai/service';
 import {BudgetError} from '../budget';
 import stylePresets from '../../../prompts/styles.json';
-import { wrapDialogue } from '../lettering';
+import { displayDialogueLines } from '../lettering';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel as acceptPanelInDomain, reviseStory, publishComic, isPanelReady } from '../domain/comic';
 import { ApplicationError, parse, pageIntentMatches, short, createSchema, patchSchema, characterSchema, panelVersionSchema, publishSchema, type Actor, type Character, type ComicDependencies, type ComicRepository, type Draft, type Edition, type PanelReview, type Json } from './contracts';
-import { hasNarrativeBlocker, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view } from './views';
+import { isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view } from './views';
 import {sameJson} from './json';
 import {styles as comicStyles} from '../styles';
 type StoryPanel = Storyboard['pages'][number]['panels'][number];
@@ -70,9 +70,8 @@ function styleRules(id: string): string {
         throw new ApplicationError('invalid_input', 'Unknown comic style.');
     return style.rules;
 }
-function requireClearNarrative(draft: Draft): void {
-    if (hasNarrativeBlocker(draft))
-        throw new ApplicationError('conflict', 'Resolve the story review blockers before generating artwork.');
+function artworkReady(draft:Draft,panel:Draft['pages'][number]['panels'][number]):boolean {
+    return panel.storyRevision===draft.storyRevision && isPanelReady(panel) && !draft.operations?.[`panel:${panel.id}`];
 }
 function requireStoryApproval(draft: Draft): void {
     if (!isStoryApproved(draft))
@@ -122,8 +121,19 @@ export function createComicService(deps: ComicDependencies) {
     }
     const asJson = (value:unknown):Json => JSON.parse(JSON.stringify(value)) as Json;
     function durable() { if (!deps.durable) throw new Error('Durable context is unavailable.'); return deps.durable; }
-    async function checkpoint<T>(key:string, work:(repository:ComicRepository)=>Promise<T>):Promise<T> {
-        return await durable().checkpoint(key, async repository => asJson(await work(repository))) as T;
+    async function checkpoint<T>(key:string, work:(repository:ComicRepository)=>Promise<T>, allowRevoked=false):Promise<T> {
+        const context=durable() as unknown as {checkpoint:(key:string,work:(repository:ComicRepository)=>Promise<Json>,allowRevoked?:boolean)=>Promise<Json>};
+        return await context.checkpoint(key,async repository=>asJson(await work(repository)),allowRevoked) as T;
+    }
+    // Completed provider work and cleanup must remain possible after revocation.
+    async function settled<T>(key:string,work:(repository:ComicRepository)=>Promise<T>):Promise<T> {
+        return checkpoint(key,work,true);
+    }
+    async function canRecordFailure(error:unknown,stepId:string):Promise<boolean> {
+        if(error instanceof AIError || error instanceof ApplicationError || error instanceof BudgetError || connectionRevoked(error))return true;
+        if(!durable().stepState)return false;
+        const state=await durable().stepState!(stepId);
+        return state===null || state==='failed';
     }
     async function prepared<T>(key:string, session:Actor, id:string, expectedRevision:number|undefined, validate:(record:{data:Draft;revision:number})=>T):Promise<T> {
         return checkpoint(key, async repository => {
@@ -153,7 +163,7 @@ export function createComicService(deps: ComicDependencies) {
         let revision:number|undefined;
         for(const step of steps){
             if(await durable().load(`${key}/unknown/${step}`)===null)continue;
-            const resumed=await checkpoint<{revision:number}>(`${key}/resumed/${step}`,async tx=>{
+            const resumed=await settled<{revision:number}>(`${key}/resumed/${step}`,async tx=>{
                 const record=await tx.getOwned<Draft>(id,session);
                 if(!record || (marker && record.data[marker]!=='unknown') || !tx.resumeTextOperation || !(await tx.resumeTextOperation(id,session)))throw new ApplicationError('conflict','The previous unknown request is not available to resume.');
                 if(marker && !(await tx.update(id,session,record.revision,{...record.data,[marker]:'running'})))throw new ApplicationError('conflict','Draft changed while resuming the request.');
@@ -161,10 +171,10 @@ export function createComicService(deps: ComicDependencies) {
             });revision=resumed.revision;
         }return revision;
     }
-    async function textFailure(key:string,session:Actor,id:string,error:unknown,marker?:'initialQuestions'|'initialSuggestions',step='request') {
-        if(!(error instanceof AIError) && !(error instanceof ApplicationError) && !(error instanceof BudgetError) && !connectionRevoked(error))return;
+    async function textFailure(key:string,session:Actor,id:string,error:unknown,marker:'initialQuestions'|'initialSuggestions'|undefined,step:string,stepId:string) {
+        if(!await canRecordFailure(error,stepId))return;
         const unknown=error instanceof AIError && (error.code==='unknown_outcome'||error.code==='invalid_response');
-        await checkpoint(unknown?`${key}/unknown/${step}`:`${key}/failed`,async tx=>{
+        await settled(unknown?`${key}/unknown/${step}`:`${key}/failed`,async tx=>{
             const record=await tx.getOwned<Draft>(id,session);
             if(record && marker && (record.data[marker]==='running' || (marker==='initialQuestions' && unknown))) {
                 if(!(await tx.update(id,session,record.revision,{...record.data,[marker]:unknown?'unknown':'failed'})))throw new ApplicationError('conflict','Draft changed while recording the request outcome.');
@@ -184,7 +194,7 @@ export function createComicService(deps: ComicDependencies) {
             if(latest.data.initialQuestions!=='running' || !questionInputsMatch(latest.data,base.data))throw new ApplicationError('conflict','Story changed while finding questions.');
             const input={plot:base.data.plot,style:base.data.styleId,answers:answeredQuestions(base.data),limit:5};
             const generated=await durable().paid({id:'initial/questions',input:asJson(input),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).questions(input));
-            await checkpoint('initial/completed',async tx=>{
+            await settled('initial/completed',async tx=>{
                 const now=await tx.getOwned<Draft>(id,session);
                 if(!now || now.data.initialQuestions!=='running' || !questionInputsMatch(now.data,base.data))throw new ApplicationError('conflict','Story changed while finding questions.');
                 const seen=new Set<string>();const questions=generated.filter(q=>{const key=q.question.trim().toLocaleLowerCase('en-US');if(seen.has(key))return false;seen.add(key);return true;}).map(q=>({...q,id:deps.id()}));
@@ -192,7 +202,7 @@ export function createComicService(deps: ComicDependencies) {
                 await tx.finishTextOperation(id,session,false);return {revision:now.revision+1};
             });
             return {comic:await viewCurrent(session,id)};
-        } catch(error){await textFailure('initial',session,id,error,'initialQuestions','questions');throw error;}
+        } catch(error){await textFailure('initial',session,id,error,'initialQuestions','questions','initial/questions');throw error;}
     }
     async function durableRefreshQuestions(session:Actor,id:string,payload:unknown,expectedRevision?:number) {
         parse(payload,z.object({}).strict());const base=await prepared('refresh/prepared',session,id,expectedRevision,record=>record);
@@ -204,7 +214,7 @@ export function createComicService(deps: ComicDependencies) {
             const answered=base.data.questions.filter(q=>base.data.answers[q.id]?.trim()),limit=Math.max(0,5-answered.length);
             const input={plot:base.data.plot,style:base.data.styleId,answers:answeredQuestions(base.data),limit};
             const additions=limit?await durable().paid({id:'refresh/questions',input:asJson(input),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).questions(input)):[];
-            await checkpoint('refresh/completed',async tx=>{
+            await (limit?settled:checkpoint)('refresh/completed',async tx=>{
                 const now=await tx.getOwned<Draft>(id,session);if(!now || now.revision!==expected || !questionInputsMatch(now.data,base.data))throw new ApplicationError('conflict','Draft changed while finding questions.');
                 const seen=new Set(answered.map(q=>q.question.trim().toLocaleLowerCase('en-US'))),questions=[...answered];
                 for(const q of additions){const key=q.question.trim().toLocaleLowerCase('en-US');if(!seen.has(key)){seen.add(key);questions.push({...q,id:deps.id()});}}
@@ -212,7 +222,7 @@ export function createComicService(deps: ComicDependencies) {
                 if(!(await tx.update(id,session,now.revision,{...now.data,questions,answers,initialQuestions:'complete'})))throw new ApplicationError('conflict','Draft changed while saving questions.');
                 await tx.finishTextOperation(id,session,false);return {revision:now.revision+1};
             });return {comic:await viewCurrent(session,id)};
-        } catch(error){await textFailure('refresh',session,id,error,'initialQuestions','questions');throw error;}
+        } catch(error){await textFailure('refresh',session,id,error,'initialQuestions','questions','refresh/questions');throw error;}
     }
     async function durableSuggestions(session:Actor,id:string,payload:unknown,expectedRevision?:number) {
         const body=parse(payload,z.object({retry:z.boolean().optional()}).strict());
@@ -230,13 +240,13 @@ export function createComicService(deps: ComicDependencies) {
             const latest=await current(session,id);if(latest.data.initialSuggestions!=='running'||latest.data.pages.length||!questionInputsMatch(latest.data,base.data))throw new ApplicationError('conflict','Story changed while suggesting characters.');
             const input={plot:base.data.plot,style:base.data.styleId,answers:answeredQuestions(base.data),existingCharacters:base.data.characters.map(({name,role})=>({name,role}))};
             const generated=await durable().paid({id:'suggestions',input:asJson(input),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).characterSuggestions(input));
-            await checkpoint('suggestions/completed',async tx=>{
+            await settled('suggestions/completed',async tx=>{
                 const now=await tx.getOwned<Draft>(id,session);if(!now||now.data.initialSuggestions!=='running'||now.data.pages.length||!questionInputsMatch(now.data,base.data))throw new ApplicationError('conflict','Story changed while suggesting characters.');
                 const seen=new Set<string>(),characterSuggestions=generated.filter(card=>{const key=card.name.toLocaleLowerCase('en-US');if(seen.has(key))return false;seen.add(key);return true;}).map(card=>({id:deps.id(),...card}));
                 if(!(await tx.update(id,session,now.revision,{...now.data,characterSuggestions,initialSuggestions:'complete'})))throw new ApplicationError('conflict','Draft changed while saving character suggestions.');
                 await tx.finishTextOperation(id,session,false);return {revision:now.revision+1};
             });return {comic:await viewCurrent(session,id)};
-        } catch(error){await textFailure('suggestions',session,id,error,'initialSuggestions','suggestions');throw error;}
+        } catch(error){await textFailure('suggestions',session,id,error,'initialSuggestions','suggestions','suggestions');throw error;}
     }
     async function durablePlanStory(session:Actor,id:string,payload:unknown,expectedRevision?:number) {
         parse(payload,z.object({}).strict());const base=await prepared('story/prepared',session,id,expectedRevision,record=>{
@@ -257,13 +267,13 @@ export function createComicService(deps: ComicDependencies) {
             latest=await current(session,id);if(latest.revision!==base.revision)throw new ApplicationError('conflict','Draft changed while planning the story.');
             const reviewInput={creatorGoal:base.data.plot,answers:answeredQuestions(base.data),bible:storyboard.bible,beats:storyboard.pages};
             step='narrative';let storyReview:unknown;try{storyReview=await durable().paid({id:'story/narrative',input:asJson(reviewInput),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).narrativeJudge(reviewInput));}catch(error){if(!(error instanceof AIError)&&!(error instanceof BudgetError))throw error;storyReview=inconclusiveReview(error);}
-            await checkpoint('story/completed',async tx=>{
+            await settled('story/completed',async tx=>{
                 const now=await tx.getOwned<Draft>(id,session);if(!now||now.revision!==base.revision)throw new ApplicationError('conflict','Draft changed while planning the story.');
                 const planned=createComic({id,ownerId:session,title:base.data.title,creatorName:base.data.creatorName,plot:base.data.plot,styleId:base.data.styleId,pages:storyboard.pages.map(page=>({id:deps.id(),panels:page.panels.map(panel=>({id:panel.id,beat:panel.action}))}))});
                 if(!(await tx.update(id,session,now.revision,{...now.data,...planned,storyboard,storyReview,storyReviewAcceptance:undefined,storyApproval:null})))throw new ApplicationError('conflict','Draft changed while planning the story.');
                 await tx.finishTextOperation(id,session,false);return {revision:now.revision+1};
             });return {comic:await viewCurrent(session,id)};
-        } catch(error){await textFailure('story',session,id,error,undefined,step);throw error;}
+        } catch(error){await textFailure('story',session,id,error,undefined,step,`story/${step}`);throw error;}
     }
     async function durablePreviewRevision(session:Actor,id:string,payload:unknown,expectedRevision?:number) {
         const body=parse(payload,z.object({panelId:short,instruction:z.string().trim().min(1).max(4000),reviewedVersion:panelVersionSchema.optional()}).strict()),prefix=`revision/${body.panelId}/preview`;
@@ -284,7 +294,7 @@ export function createComicService(deps: ComicDependencies) {
             const proposed:Storyboard={...input.storyboard,bible:result.revised_bible,pages:input.storyboard.pages.map(page=>({...page,panels:page.panels.map(panel=>changed.get(panel.id)??panel)}))};
             const errors=validateStoryLedger(proposed);if(errors.length)throw new ApplicationError('invalid_story',`Revised story state needs correction: ${errors[0]}`);
             if(base.data.pages.findIndex(page=>page.panels.some(panel=>panel.id===result.earliest_affected_panel_id))<0)throw new ApplicationError('invalid_story','Revision points to a missing panel.');
-            return await checkpoint(`${prefix}/completed`,async tx=>{
+            return await settled(`${prefix}/completed`,async tx=>{
                 const latest=await tx.getOwned<Draft>(id,session);if(!latest||latest.revision!==base.revision)throw new ApplicationError('conflict','Draft changed while planning the revision; refresh and try again.');
                 const proposal={id:deps.id(),baseRevision:latest.revision+1,baseStoryRevision:base.data.storyRevision,result};
                 const pendingArtworkDecision=base.data.pendingArtworkDecision?.panelId===body.panelId&&base.data.pendingArtworkDecision.instruction===body.instruction?undefined:base.data.pendingArtworkDecision;
@@ -292,7 +302,7 @@ export function createComicService(deps: ComicDependencies) {
                 if(!(await tx.update(id,session,latest.revision,updated)))throw new ApplicationError('conflict','Draft changed while planning the revision; refresh and try again.');
                 await tx.finishTextOperation(id,session,false);return {proposal:revisionPreview(updated,latest.revision+1)!};
             });
-        } catch(error){await textFailure(prefix,session,id,error,undefined,'preview');throw error;}
+        } catch(error){await textFailure(prefix,session,id,error,undefined,'preview',prefix);throw error;}
     }
     async function durableApplyRevision(session:Actor,id:string,payload:unknown,expectedRevision?:number) {
         const body=parse(payload,z.object({proposalId:short}).strict()),prefix=`revision/${body.proposalId}`;
@@ -317,33 +327,33 @@ export function createComicService(deps: ComicDependencies) {
                 let storyReview:unknown;try{storyReview=await durable().paid({id:`${prefix}/narrative`,input:asJson(input),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).narrativeJudge(input));}catch(error){if(!(error instanceof AIError)&&!(error instanceof BudgetError))throw error;storyReview=inconclusiveReview(error);}
                 const next:Draft={...updated,storyboard,storyReview,storyReviewAcceptance:undefined,pendingRevision:undefined,pageOperations:undefined};
                 const fingerprint=storyFingerprint(next);if(!fingerprint)throw new ApplicationError('conflict','The revised story is missing.');next.storyApproval={storyRevision:next.storyRevision,fingerprint};
-                applied=await checkpoint(`${prefix}/applied`,async tx=>{
+                applied=await settled(`${prefix}/applied`,async tx=>{
                     const now=await tx.getOwned<Draft>(id,session);if(!now||now.revision!==base.revision||!(await tx.update(id,session,now.revision,next)))throw new ApplicationError('conflict','Draft changed while applying revision; preview it again.');
                     await tx.finishTextOperation(id,session,false);return {next};
                 });
-            } catch(error){await textFailure(prefix,session,id,error,undefined,'narrative');throw error;}
+            } catch(error){await textFailure(prefix,session,id,error,undefined,'narrative',`${prefix}/narrative`);throw error;}
         }
         const next=applied.next,latest=await current(session,id);
         if(latest.data.storyRevision!==next.storyRevision||storyFingerprint(latest.data)!==storyFingerprint(next))throw new ApplicationError('conflict','Story changed while continuing the revision.');
         const firstPage=next.pages.findIndex(page=>page.panels.some(panel=>panel.id===base.proposal.result.earliest_affected_panel_id));
-        const previousReady=firstPage===0||next.pages[firstPage-1].panels.every(p=>p.storyRevision===next.storyRevision&&isPanelReady(p));let notice='';
-        if(previousReady&&!hasNarrativeBlocker(next)) {
+        const previousReady=firstPage===0||next.pages[firstPage-1].panels.every(p=>artworkReady(next,p));let notice='';
+        if(previousReady) {
             const pagePanels=next.pages[firstPage].panels,affected=pagePanels.findIndex(panel=>panel.id===base.proposal.result.earliest_affected_panel_id),incomplete=pagePanels.findIndex(panel=>!panel.assetId||panel.status==='outdated'||panel.status==='planned'),first=incomplete>=0?Math.min(incomplete,affected):affected;
             for(const panel of pagePanels.slice(first)){
                 try{await durableRenderPanel(session,id,panel.id);}catch(error){if(error instanceof AIError&&(error.code==='unknown_outcome'||error.code==='invalid_response'))throw error;if(!(error instanceof ApplicationError)&&!(error instanceof AIError)&&!(error instanceof BudgetError))throw error;notice='Story change saved, but artwork did not finish. Review the page and resolve any outstanding operation before continuing.';break;}
                 const currentPanel=(await current(session,id)).data.pages[firstPage].panels.find(p=>p.id===panel.id);
-                if(!currentPanel||(currentPanel.evaluation==='blocker'&&!isPanelReady(currentPanel))){notice='Story change saved. Review the panel blocker before continuing the page.';break;}
+                if(!currentPanel){notice='Story change saved, but a panel is missing.';break;}
             }
         }
-        notice ||= hasNarrativeBlocker(next)?'Resolve the story review blockers before generating artwork.':'Later pages remain outdated until you review the preceding page and generate them.';
-        await checkpoint(`${prefix}/finished`,async()=>({notice}));return {comic:await viewCurrent(session,id),notice};
+        notice ||= 'Later pages remain outdated until you generate them.';
+        await settled(`${prefix}/finished`,async()=>({notice}));return {comic:await viewCurrent(session,id),notice};
     }
     async function durableEditPanel(session:Actor,id:string,itemId:string,payload:unknown,expectedRevision?:number) {
         const body=parse(payload,z.union([panelVersionSchema.extend({instruction:z.string().trim().min(1).max(2000)}).strict(),z.object({proposalId:z.string().uuid(),decision:z.literal('artwork_only')}).strict()])),prefix=`edit/${itemId}`;
         const base=await prepared(`${prefix}/prepared`,session,id,expectedRevision,record=>{
-            const data=record.data;requireStoryApproval(data);requireClearNarrative(data);
+            const data=record.data;requireStoryApproval(data);
             const panel=data.pages.flatMap(page=>page.panels).find(p=>p.id===itemId);
-            if(!panel||!panel.assetId||panel.storyRevision!==data.storyRevision||panel.status==='outdated'||panel.status==='checking')throw new ApplicationError('conflict','Generate the current panel before editing its artwork.');
+            if(!panel||!artworkReady(data,panel))throw new ApplicationError('conflict','Generate the current panel before editing its artwork.');
             let instruction:string,reviewed:z.infer<typeof panelVersionSchema>;
             if('proposalId' in body){const proposal=data.pendingArtworkDecision;if(!proposal||proposal.id!==body.proposalId||proposal.panelId!==itemId||proposal.intent==='story'||proposal.expiresAt<=Date.now())throw new ApplicationError('conflict','This edit choice has expired. Review the edit again.');instruction=proposal.instruction;reviewed={assetId:proposal.assetId,storyRevision:proposal.storyRevision,panelRevision:proposal.panelRevision};}
             else {instruction=body.instruction;reviewed={assetId:body.assetId,storyRevision:body.storyRevision,panelRevision:body.panelRevision};}
@@ -362,14 +372,14 @@ export function createComicService(deps: ComicDependencies) {
                     if(!panel||panel.assetId!==base.reviewed.assetId||panel.revision!==base.reviewed.panelRevision||panel.storyRevision!==base.reviewed.storyRevision||now.data.storyRevision!==base.reviewed.storyRevision)throw new ApplicationError('conflict','This panel changed while checking the edit. Refresh and review the current image.');
                     const spec=base.data.storyboard?.pages.flatMap(page=>page.panels).find(p=>p.id===itemId),input={instruction:base.instruction,panelContext:JSON.stringify({beat:base.panel.beat,bible:base.data.storyboard?.bible,scene:spec})};
                     const result=await durable().paid({id:`panel/${itemId}/classify`,input:asJson(input),expectedRevision:now.revision},fetch=>deps.provider({fetch}).classifyEdit(input));
-                    decision=await checkpoint(`${prefix}/classified`,async tx=>{
+                    decision=await settled(`${prefix}/classified`,async tx=>{
                         const latest=await tx.getOwned<Draft>(id,session),panel=latest?.data.pages.flatMap(page=>page.panels).find(p=>p.id===itemId);
                         if(!latest||!panel||panel.assetId!==base.reviewed.assetId||panel.revision!==base.reviewed.panelRevision||panel.storyRevision!==base.reviewed.storyRevision||latest.data.storyRevision!==base.reviewed.storyRevision)throw new ApplicationError('conflict','This panel changed while checking the edit. Refresh and review the current image.');
                         let proposalId:string|undefined;
                         if(result.intent==='uncertain'||result.intent==='story'){proposalId=deps.id();const proposal={id:proposalId,panelId:itemId,instruction:base.instruction,...base.reviewed,reason:result.reason,intent:result.intent,expiresAt:Date.now()+15*60*1000};if(!(await tx.update(id,session,latest.revision,{...latest.data,pendingArtworkDecision:proposal})))throw new ApplicationError('conflict','Draft changed while checking the edit. Refresh and try again.');}
                         await tx.finishTextOperation(id,session,false);return {...result,...(proposalId?{proposalId}:{})};
                     });
-                }catch(error){await textFailure(prefix,session,id,error,undefined,'classify');throw error;}
+                }catch(error){await textFailure(prefix,session,id,error,undefined,'classify',`panel/${itemId}/classify`);throw error;}
             }
             if(decision.intent!=='artwork'){
                 const latest=await current(session,id),panel=latest.data.pages.flatMap(page=>page.panels).find(p=>p.id===itemId),proposal=latest.data.pendingArtworkDecision;
@@ -400,7 +410,7 @@ export function createComicService(deps: ComicDependencies) {
                 const state=await durable().stepState?.(step) ?? (await durable().assetIdFor?.(step) ? 'completed' : null);
                 if(priorUnknown.marker!==reservation.marker || (state==='completed' && !await durable().assetIdFor?.(step)))throw new ApplicationError('conflict','The previous unknown reference is not available to resume.');
                 if(state!=='completed' && state!=='failed')throw new AIError('unknown_outcome','The previous reference outcome is still unknown.');
-                await checkpoint(`${prefix}/resumed`,async tx=>{const now=await tx.getOwned<Draft>(id,session);if(!now||now.data.operations?.[op]!=='unknown_outcome'||now.data.durableOperationMarkers?.[op]!==reservation.marker)throw new ApplicationError('conflict','The previous unknown reference is not available to resume.');if(!(await tx.update(id,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'running'}})))throw new ApplicationError('conflict','Draft changed while resuming the reference.');return {revision:now.revision+1};});
+                await settled(`${prefix}/resumed`,async tx=>{const now=await tx.getOwned<Draft>(id,session);if(!now||now.data.operations?.[op]!=='unknown_outcome'||now.data.durableOperationMarkers?.[op]!==reservation.marker)throw new ApplicationError('conflict','The previous unknown reference is not available to resume.');if(!(await tx.update(id,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'running'}})))throw new ApplicationError('conflict','Draft changed while resuming the reference.');return {revision:now.revision+1};});
             }
             const valid=(data:Draft)=>data.operations?.[op]==='running' && data.durableOperationMarkers?.[op]===reservation.marker && !data.pages.length && data.styleId===base.data.styleId && same(data.characters.find(c=>c.id===itemId),base.character);
             const now=await current(session,id);if(!valid(now.data))throw new ApplicationError('conflict','Character inputs changed while rendering; the result was not applied.');
@@ -408,7 +418,7 @@ export function createComicService(deps: ComicDependencies) {
             const bytes=await durable().paid({id:step,input:asJson(input),expectedRevision:now.revision},fetch=>deps.provider({fetch}).characterReference(input));
             if(!Buffer.isBuffer(bytes)||!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))throw new ApplicationError('invalid_provider_response','Image provider did not return a PNG.');
             const assetId=await durable().assetIdFor?.(step);if(!assetId)throw new Error('The durable reference asset is unavailable.');
-            await checkpoint(`${prefix}/associated`,async tx=>{
+            await settled(`${prefix}/associated`,async tx=>{
                 const latest=await tx.getOwned<Draft>(id,session);if(!latest||!valid(latest.data))throw new ApplicationError('conflict','Character inputs changed while rendering; the result was not applied.');
                 const {[op]:ignored,...operations}=latest.data.operations??{};void ignored;const {[op]:marker,...durableOperationMarkers}=latest.data.durableOperationMarkers??{};void marker;
                 const characters=latest.data.characters.map(c=>c.id===itemId?{...c,approved:false,referenceAssetId:assetId,referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`}:c);
@@ -416,9 +426,9 @@ export function createComicService(deps: ComicDependencies) {
                 return {assetId,revision:latest.revision+1};
             });return {comic:await viewCurrent(session,id)};
         } catch(error){
-            if(error instanceof AIError || error instanceof ApplicationError || error instanceof BudgetError || connectionRevoked(error)){
+            if(await canRecordFailure(error,`${prefix}/reference`)){
                 const unknown=error instanceof AIError && (error.code==='unknown_outcome'||error.code==='invalid_response');
-                await checkpoint(`${prefix}/${unknown?'unknown':'failed'}`,async tx=>{
+                await settled(`${prefix}/${unknown?'unknown':'failed'}`,async tx=>{
                     const latest=await tx.getOwned<Draft>(id,session);if(latest?.data.operations?.[op]==='running'&&latest.data.durableOperationMarkers?.[op]===reservation.marker){
                         const operations={...latest.data.operations},markers={...latest.data.durableOperationMarkers};if(unknown)operations[op]='unknown_outcome';else {delete operations[op];delete markers[op];}
                         if(!(await tx.update(id,session,latest.revision,{...latest.data,operations,durableOperationMarkers:markers})))throw new ApplicationError('conflict','Draft changed while recording the reference outcome.');
@@ -431,13 +441,11 @@ export function createComicService(deps: ComicDependencies) {
         const prefix=`panel/${panelId}`;
         const base=await prepared(`${prefix}/prepared`,session,comicId,undefined,record=>{
             const draft=record.data;if(!draft.storyboard)throw new ApplicationError('conflict','Plan the story first.');
-            requireStoryApproval(draft);requireClearNarrative(draft);
+            requireStoryApproval(draft);
             const panels=draft.pages.flatMap(page=>page.panels),index=panels.findIndex(panel=>panel.id===panelId);
             if(index<0)throw new ApplicationError('not_found','Panel not found.');const panel=panels[index],previous=index>0?panels[index-1]:undefined;
-            if(panel.status==='checking')throw new ApplicationError('conflict','Wait for the panel review to finish.');
-            if(expectedVersion&&(panel.assetId!==expectedVersion.assetId||panel.revision!==expectedVersion.panelRevision||panel.storyRevision!==expectedVersion.storyRevision||draft.storyRevision!==expectedVersion.storyRevision))throw new ApplicationError('conflict','Panel changed while planning the edit; refresh and review it again.');
-            if(previous&&(!previous.assetId||previous.storyRevision!==draft.storyRevision||['outdated','planned','checking'].includes(previous.status)))throw new ApplicationError('conflict','Generate and review earlier panels first.');
-            if(previous?.evaluation==='blocker'&&!isPanelReady(previous))throw new ApplicationError('conflict','Review the preceding panel before generating this one.');
+                        if(expectedVersion&&(panel.assetId!==expectedVersion.assetId||panel.revision!==expectedVersion.panelRevision||panel.storyRevision!==expectedVersion.storyRevision||draft.storyRevision!==expectedVersion.storyRevision))throw new ApplicationError('conflict','Panel changed while planning the edit; refresh and review it again.');
+            if(previous&&!artworkReady(draft,previous))throw new ApplicationError('conflict','Generate earlier panels first.');
             const spec=draft.storyboard.pages.flatMap(page=>page.panels).find(panel=>panel.id===panelId);if(!spec)throw new ApplicationError('conflict','The storyboard does not match this panel.');
             const {dialogue:_dialogue,...visualSpec}=spec;void _dialogue;
             const characters=draft.characters.filter(c=>spec.character_ids.includes(c.id));
@@ -449,7 +457,7 @@ export function createComicService(deps: ComicDependencies) {
         if(await durable().load(`${prefix}/reviewed`)!==null)return;
         const op=`panel:${panelId}`;let imageMarker:string|undefined;const originalValid=(draft:Draft)=>{
             const panels=draft.pages.flatMap(page=>page.panels),index=panels.findIndex(panel=>panel.id===panelId),previous=index>0?panels[index-1]:undefined;
-            return !!imageMarker&&draft.operations?.[op]==='running'&&draft.durableOperationMarkers?.[op]===imageMarker&&draft.storyRevision===base.data.storyRevision&&draft.styleId===base.data.styleId&&same(draft.storyboard,base.data.storyboard)&&same(draft.characters,base.data.characters)&&same(panels[index],base.panel)&&same(previous??null,base.previous)&&isStoryApproved(draft)&&!hasNarrativeBlocker(draft);
+            return !!imageMarker&&draft.operations?.[op]==='running'&&draft.durableOperationMarkers?.[op]===imageMarker&&draft.storyRevision===base.data.storyRevision&&draft.styleId===base.data.styleId&&same(draft.storyboard,base.data.storyboard)&&same(draft.characters,base.data.characters)&&same(panels[index],base.panel)&&same(previous??null,base.previous)&&isStoryApproved(draft);
         };
         let associated=await durable().load(`${prefix}/image-associated`) as {assetId:string}|null;
         if(!associated){
@@ -463,7 +471,7 @@ export function createComicService(deps: ComicDependencies) {
                     const step=`${prefix}/image`,state=await durable().stepState?.(step) ?? (await durable().assetIdFor?.(step) ? 'completed' : null);
                     if(priorUnknown.marker!==reservation.marker || (state==='completed' && !await durable().assetIdFor?.(step)))throw new ApplicationError('conflict','The previous unknown panel is not available to resume.');
                     if(state!=='completed' && state!=='failed')throw new AIError('unknown_outcome','The previous panel outcome is still unknown.');
-                    await checkpoint(`${prefix}/image-resumed`,async tx=>{const now=await tx.getOwned<Draft>(comicId,session);if(!now||now.data.operations?.[op]!=='unknown_outcome'||now.data.durableOperationMarkers?.[op]!==reservation.marker)throw new ApplicationError('conflict','The previous unknown panel is not available to resume.');if(!(await tx.update(comicId,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'running'}})))throw new ApplicationError('conflict','Draft changed while resuming the panel.');return {revision:now.revision+1};});
+                    await settled(`${prefix}/image-resumed`,async tx=>{const now=await tx.getOwned<Draft>(comicId,session);if(!now||now.data.operations?.[op]!=='unknown_outcome'||now.data.durableOperationMarkers?.[op]!==reservation.marker)throw new ApplicationError('conflict','The previous unknown panel is not available to resume.');if(!(await tx.update(comicId,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'running'}})))throw new ApplicationError('conflict','Draft changed while resuming the panel.');return {revision:now.revision+1};});
                 }
                 const now=await current(session,comicId);if(!originalValid(now.data))throw new ApplicationError('conflict','Panel inputs changed while rendering; the result was not applied.');
                 const referenceIds=[...base.anchors.map(c=>({role:'approved character',id:c.id,assetId:c.referenceAssetId!})),...(base.previous?.assetId?[{role:'previous panel',id:base.previous.id,assetId:base.previous.assetId}]:[])];
@@ -474,7 +482,7 @@ export function createComicService(deps: ComicDependencies) {
                 });
                 if(!Buffer.isBuffer(bytes)||!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))throw new ApplicationError('invalid_provider_response','Image provider did not return a PNG.');
                 const assetId=await durable().assetIdFor?.(`${prefix}/image`);if(!assetId)throw new Error('The durable panel asset is unavailable.');
-                associated=await checkpoint(`${prefix}/image-associated`,async tx=>{
+                associated=await settled(`${prefix}/image-associated`,async tx=>{
                     const latest=await tx.getOwned<Draft>(comicId,session);if(!latest||!originalValid(latest.data))throw new ApplicationError('conflict','Panel inputs changed while rendering; the result was not applied.');
                     const updated=commitPanelRender(latest.data,session,panelId,{storyRevision:base.data.storyRevision,panelRevision:base.panel.revision},assetId,'uncertain') as Draft;
                     const {[op]:ignored,...operations}=updated.operations??{};void ignored;const {[op]:marker,...durableOperationMarkers}=updated.durableOperationMarkers??{};void marker;
@@ -485,8 +493,8 @@ export function createComicService(deps: ComicDependencies) {
                     return {assetId};
                 });
             } catch(error){
-                if(error instanceof AIError||error instanceof ApplicationError||error instanceof BudgetError||connectionRevoked(error)){const unknown=error instanceof AIError&&(error.code==='unknown_outcome'||error.code==='invalid_response');
-                    await checkpoint(`${prefix}/image-${unknown?'unknown':'failed'}`,async tx=>{const latest=await tx.getOwned<Draft>(comicId,session);if(latest?.data.operations?.[op]==='running'&&latest.data.durableOperationMarkers?.[op]===reservation.marker){const operations={...latest.data.operations},markers={...latest.data.durableOperationMarkers};if(unknown)operations[op]='unknown_outcome';else {delete operations[op];delete markers[op];}if(!(await tx.update(comicId,session,latest.revision,{...latest.data,operations,durableOperationMarkers:markers})))throw new ApplicationError('conflict','Draft changed while recording the image outcome.');}return {marker:reservation.marker};});
+                if(await canRecordFailure(error,`${prefix}/image`)){const unknown=error instanceof AIError&&(error.code==='unknown_outcome'||error.code==='invalid_response');
+                    await settled(`${prefix}/image-${unknown?'unknown':'failed'}`,async tx=>{const latest=await tx.getOwned<Draft>(comicId,session);if(latest?.data.operations?.[op]==='running'&&latest.data.durableOperationMarkers?.[op]===reservation.marker){const operations={...latest.data.operations},markers={...latest.data.durableOperationMarkers};if(unknown)operations[op]='unknown_outcome';else {delete operations[op];delete markers[op];}if(!(await tx.update(comicId,session,latest.revision,{...latest.data,operations,durableOperationMarkers:markers})))throw new ApplicationError('conflict','Draft changed while recording the image outcome.');}return {marker:reservation.marker};});
                 }throw error;
             }
         }
@@ -494,7 +502,7 @@ export function createComicService(deps: ComicDependencies) {
         const reviewValid=(draft:Draft)=>{
             const panels=draft.pages.flatMap(page=>page.panels),index=panels.findIndex(panel=>panel.id===panelId),p=panels[index],previous=index>0?panels[index-1]:undefined;
             const previousUnchanged=base.previous?!!previous&&previous.id===base.previous.id&&previous.assetId===base.previous.assetId&&previous.revision===base.previous.revision&&previous.storyRevision===base.previous.storyRevision:!previous;
-            return !!p&&previousUnchanged&&p.assetId===assetId&&p.storyRevision===base.data.storyRevision&&p.revision===base.panel.revision+1&&p.status==='checking'&&draft.storyRevision===base.data.storyRevision&&same(draft.storyboard,base.data.storyboard)&&same(draft.characters,base.data.characters)&&isStoryApproved(draft)&&!hasNarrativeBlocker(draft);
+            return !!p&&previousUnchanged&&p.assetId===assetId&&p.storyRevision===base.data.storyRevision&&p.revision===base.panel.revision+1&&p.status==='checking'&&draft.storyRevision===base.data.storyRevision&&same(draft.storyboard,base.data.storyboard)&&same(draft.characters,base.data.characters)&&isStoryApproved(draft);
         };
         const latest=await current(session,comicId),reviewUnknown=await durable().load(`${prefix}/review-unknown`) as {assetId:string;marker:string}|null;
         if(!reviewValid(latest.data)||(reviewUnknown&&(latest.data.operations?.[op]!=='unknown_outcome'||latest.data.durableOperationMarkers?.[op]!==reviewUnknown.marker)))throw new ApplicationError('conflict','Panel changed while reviewing the image.');
@@ -508,12 +516,12 @@ export function createComicService(deps: ComicDependencies) {
             });findings=result.findings;outcome=result.outcome;
         } catch(error){
             if(error instanceof AIError&&(error.code==='unknown_outcome'||error.code==='invalid_response')){
-                await checkpoint(`${prefix}/review-unknown`,async tx=>{const now=await tx.getOwned<Draft>(comicId,session),marker=deps.id();if(!now||!reviewValid(now.data)||now.data.operations?.[op])throw new ApplicationError('conflict','Draft changed while recording the review outcome.');if(!(await tx.update(comicId,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'unknown_outcome'},durableOperationMarkers:{...now.data.durableOperationMarkers,[op]:marker}})))throw new ApplicationError('conflict','Draft changed while recording the review outcome.');return {assetId,marker};});throw error;
+                await settled(`${prefix}/review-unknown`,async tx=>{const now=await tx.getOwned<Draft>(comicId,session),marker=deps.id();if(!now||!reviewValid(now.data)||now.data.operations?.[op])throw new ApplicationError('conflict','Draft changed while recording the review outcome.');if(!(await tx.update(comicId,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'unknown_outcome'},durableOperationMarkers:{...now.data.durableOperationMarkers,[op]:marker}})))throw new ApplicationError('conflict','Draft changed while recording the review outcome.');return {assetId,marker};});throw error;
             }
             if(connectionRevoked(error))revocation=error;
             else if(!(error instanceof AIError)&&!(error instanceof BudgetError))throw error;
         }
-        await checkpoint(`${prefix}/reviewed`,async tx=>{
+        await settled(`${prefix}/reviewed`,async tx=>{
             const now=await tx.getOwned<Draft>(comicId,session);if(!now||!reviewValid(now.data))throw new ApplicationError('conflict','Panel changed while saving the review.');
             const p=now.data.pages.flatMap(page=>page.panels).find(panel=>panel.id===panelId)!;
             const evaluation=findings.some(f=>f.severity==='blocker')?'blocker':findings.some(f=>f.severity==='warning')?'warning':'uncertain';
@@ -530,14 +538,14 @@ export function createComicService(deps: ComicDependencies) {
         if(body.pageId!==undefined&&body.pageId!==itemId)throw new ApplicationError('invalid_input','Please check the supplied fields.');
         const prefix=`page/${itemId}`;
         const base=await prepared(`${prefix}/prepared`,session,id,expectedRevision,record=>{
-            const data=record.data;requireStoryApproval(data);requireClearNarrative(data);
+            const data=record.data;requireStoryApproval(data);
             const index=data.pages.findIndex(page=>page.id===itemId);if(index<0)throw new ApplicationError('not_found','Page not found.');
-            if(index>0&&data.pages[index-1].panels.some(p=>p.storyRevision!==data.storyRevision||!isPanelReady(p)))throw new ApplicationError('conflict','Review and accept the preceding page first.');
-            const page=data.pages[index];if(page.panels.some(p=>p.status==='checking'))throw new ApplicationError('conflict','Wait for the panel review to finish.');
+            if(index>0&&data.pages[index-1].panels.some(p=>!artworkReady(data,p)))throw new ApplicationError('conflict','Review and accept the preceding page first.');
+            const page=data.pages[index];
             if(body.intent&&!pageIntentMatches(data,itemId,body.intent))throw new ApplicationError('conflict','Page progress changed. Refresh and choose the appropriate action.');
             let operation=data.pageOperations?.[itemId];if(operation&&operation.storyRevision!==data.storyRevision)operation=undefined;
             const needsStart=!operation;
-            if(!operation){const full=page.panels.every(p=>!!p.assetId&&p.storyRevision===data.storyRevision&&['current','needs_review'].includes(p.status));const first=page.panels.findIndex(p=>!p.assetId||p.storyRevision!==data.storyRevision||!['current','needs_review'].includes(p.status));const targets=full?page.panels:page.panels.slice(first);operation={storyRevision:data.storyRevision,baseline:Object.fromEntries(targets.map(p=>[p.id,p.revision]))};}
+            if(!operation){const full=page.panels.every(p=>artworkReady(data,p));const first=page.panels.findIndex(p=>!artworkReady(data,p));const targets=full?page.panels:page.panels.slice(first);operation={storyRevision:data.storyRevision,baseline:Object.fromEntries(targets.map(p=>[p.id,p.revision]))};}
             return {...record,operation,needsStart};
         });
         if(await durable().load(`${prefix}/completed`)!==null)return {comic:await viewCurrent(session,id)};
@@ -550,7 +558,7 @@ export function createComicService(deps: ComicDependencies) {
             const now=await current(session,id);if(now.data.storyRevision!==base.operation.storyRevision)throw new ApplicationError('conflict','Story changed while drawing the page.');
             const panel=now.data.pages.flatMap(page=>page.panels).find(p=>p.id===panelId);if(!panel)throw new ApplicationError('conflict','Panel no longer exists.');
             if(panel.revision!==baseline){
-                if(panel.evaluation==='blocker'&&!isPanelReady(panel))return {comic:view(now.data,await store.getPublished<Edition>(id),now.revision),notice:'Page generation paused. Repair or explicitly accept the flagged panel before continuing.'};
+
                 const association=await durable().load(`panel/${panelId}/image-associated`) as {assetId:string}|null;
                 if(!association&&!base.needsStart){
                     const prior=base.data.pages.flatMap(page=>page.panels).find(p=>p.id===panelId);
@@ -561,10 +569,8 @@ export function createComicService(deps: ComicDependencies) {
                 else if(['current','needs_review'].includes(panel.status)){if(await durable().load(`panel/${panelId}/reviewed`)===null)throw new ApplicationError('conflict','Panel changed while drawing the page.');continue;}
                 else throw new ApplicationError('conflict','Panel changed while drawing the page.');
             } else await durableRenderPanel(session,id,panelId);
-            const reviewed=await current(session,id),finished=reviewed.data.pages.flatMap(page=>page.panels).find(p=>p.id===panelId);
-            if(finished?.evaluation==='blocker'&&!isPanelReady(finished))return {comic:view(reviewed.data,await store.getPublished<Edition>(id),reviewed.revision),notice:'Page generation paused. Repair or explicitly accept the flagged panel before continuing.'};
         }
-        await checkpoint(`${prefix}/completed`,async tx=>{
+        await settled(`${prefix}/completed`,async tx=>{
             const latest=await tx.getOwned<Draft>(id,session);if(!latest||latest.data.storyRevision!==base.operation.storyRevision||!same(latest.data.pageOperations?.[itemId],base.operation))throw new ApplicationError('conflict','Draft changed; refresh to see page progress.');
             const {[itemId]:finished,...pageOperations}=latest.data.pageOperations??{};void finished;
             if(!(await tx.update(id,session,latest.revision,{...latest.data,pageOperations})))throw new ApplicationError('conflict','Draft changed; refresh to see page progress.');
@@ -577,22 +583,17 @@ export function createComicService(deps: ComicDependencies) {
             throw new ApplicationError('conflict', 'Plan the story first.');
         const draft = record.data;
         requireStoryApproval(draft);
-        requireClearNarrative(draft);
         const storyboard = draft.storyboard!;
         const panels = draft.pages.flatMap(page => page.panels);
         const index = panels.findIndex(p => p.id === panelId);
         if (index < 0)
             throw new ApplicationError('not_found', 'Panel not found.');
         const panel = panels[index];
-        if (panel.status === 'checking')
-            throw new ApplicationError('conflict', 'Wait for the panel review to finish.');
         if (expectedVersion && (panel.assetId !== expectedVersion.assetId || panel.revision !== expectedVersion.panelRevision || panel.storyRevision !== expectedVersion.storyRevision || draft.storyRevision !== expectedVersion.storyRevision))
             throw new ApplicationError('conflict', 'Panel changed while planning the edit; refresh and review it again.');
         const previous = index > 0 ? panels[index - 1] : undefined;
-        if (previous && (!previous.assetId || previous.storyRevision !== draft.storyRevision || ['outdated', 'planned', 'checking'].includes(previous.status)))
-            throw new ApplicationError('conflict', 'Generate and review earlier panels first.');
-        if (previous?.evaluation === 'blocker' && !isPanelReady(previous))
-            throw new ApplicationError('conflict', 'Review the preceding panel before generating this one.');
+        if (previous && !artworkReady(draft,previous))
+            throw new ApplicationError('conflict', 'Generate earlier panels first.');
         const spec = storyboard.pages.flatMap(p => p.panels).find(p => p.id === panelId);
         if (!spec)
             throw new ApplicationError('conflict', 'The storyboard does not match this panel.');
@@ -629,7 +630,7 @@ export function createComicService(deps: ComicDependencies) {
                     latest.data.styleId !== draft.styleId || !sameJson(latest.data.storyboard,storyboard) ||
                     !sameJson(latest.data.characters,draft.characters) ||
                     !sameJson(current,panel) || !sameJson(currentPrevious,previous) ||
-                    !isStoryApproved(latest.data) || hasNarrativeBlocker(latest.data))
+                    !isStoryApproved(latest.data))
                     throw new ApplicationError('conflict', 'Panel inputs changed while rendering; the result was not applied.');
                 const updated = commitPanelRender(latest.data, session, panelId, { storyRevision: draft.storyRevision, panelRevision: panel.revision }, assetId, 'uncertain') as Draft;
                 const { [op]: ignored, ...operations } = updated.operations ?? {};
@@ -662,7 +663,11 @@ export function createComicService(deps: ComicDependencies) {
         }
         if (!assetId)
             throw new Error('Panel image was not saved.');
-        // An unsuccessful or uncalibrated review remains uncertain and requires creator acceptance.
+        if(deps.advisory) {
+            deps.advisory.visual({draft,panelId,assetId,panelRevision:panel.revision+1,bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:visualSpec,references});
+            return;
+        }
+        // Without a local scheduler, the review is recorded inline.
         let findings: Awaited<ReturnType<ReturnType<typeof ai>['visualJudge']>>['findings'] = [];
         let outcome: PanelReview['outcome'] = 'failed';
         try {
@@ -712,7 +717,7 @@ export function createComicService(deps: ComicDependencies) {
                 const lines: string[] = [];
                 for (const dialogue of spec.dialogue) {
                     const name = draft.characters.find(c => c.id === dialogue.speaker_id)?.name ?? dialogue.speaker_id;
-                    lines.push(...wrapDialogue(`${name}: ${dialogue.text}`, grid ? 17 : 25));
+                    lines.push(...displayDialogueLines(`${name}: ${dialogue.text}`, grid ? 17 : 25));
                 }
                 sections.push({ image, lines });
             }
@@ -946,14 +951,15 @@ export function createComicService(deps: ComicDependencies) {
                 throw new ApplicationError('invalid_story', `Story state needs correction: ${ledgerErrors[0]}`);
             const planned = createComic({ id, ownerId: session, title: data.title, creatorName: data.creatorName, plot: data.plot, styleId: data.styleId,
                 pages: storyboard.pages.map(p => ({ id: deps.id(), panels: p.panels.map(panel => ({ id: panel.id, beat: panel.action })) })) });
-            let storyReview: unknown;
-            try {
-                storyReview = await ai().narrativeJudge({ creatorGoal: data.plot, answers: answeredQuestions(data), bible: storyboard.bible, beats: storyboard.pages });
+            let storyReview: unknown={outcome:'pending',findings:[]};
+            if(!deps.advisory) {
+                try {storyReview=await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
+                catch(error){storyReview=inconclusiveReview(error);}
             }
-            catch (error) {
-                storyReview = inconclusiveReview(error);
-            }
-            return ({ comic: (await save(store, session, revision, { ...data, ...planned, storyboard, storyReview, storyReviewAcceptance: undefined, storyApproval: null })) });
+            const next:Draft={...data,...planned,storyboard,storyReview,storyReviewRunId:deps.advisory?deps.id():undefined,storyReviewAcceptance:undefined,storyApproval:null};
+            const comic=await save(store,session,revision,next);
+            deps.advisory?.narrative(next);
+            return {comic};
         });
     }
     async function generateReference(session: Actor, id: string, itemId: string, payload: unknown = {}, expectedRevision?: number) {
@@ -1091,14 +1097,12 @@ export function createComicService(deps: ComicDependencies) {
                 throw new ApplicationError('invalid_story', `Revised story state needs correction: ${errors[0]}`);
             const beats = Object.fromEntries(proposal.result.revised_suffix.map(panel => [panel.id, panel.action]));
             const updated = reviseStory(data, session, data.storyRevision, proposal.result.earliest_affected_panel_id, beats) as Draft;
-            let storyReview: unknown;
-            try {
-                storyReview = await ai().narrativeJudge({ creatorGoal: data.plot, answers: answeredQuestions(data), bible: storyboard.bible, beats: storyboard.pages });
+            let storyReview:unknown={outcome:'pending',findings:[]};
+            if(!deps.advisory) {
+                try {storyReview=await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
+                catch(error){storyReview=inconclusiveReview(error);}
             }
-            catch (error) {
-                storyReview = inconclusiveReview(error);
-            }
-            const next: Draft = { ...updated, storyboard, storyReview, storyReviewAcceptance: undefined, pendingRevision: undefined, pageOperations: undefined };
+            const next: Draft = { ...updated, storyboard, storyReview, storyReviewRunId:deps.advisory?deps.id():undefined, storyReviewAcceptance: undefined, pendingRevision: undefined, pageOperations: undefined };
             const fingerprint = storyFingerprint(next);
             if (!fingerprint) throw new ApplicationError('conflict', 'The revised story is missing.');
             next.storyApproval = {storyRevision:next.storyRevision,fingerprint};
@@ -1106,10 +1110,11 @@ export function createComicService(deps: ComicDependencies) {
                 throw new ApplicationError('conflict', 'Draft changed while applying revision; preview it again.');
             return next;
         });
+        deps.advisory?.narrative(next);
         const firstPage = next.pages.findIndex(page => page.panels.some(panel => panel.id === proposal.result.earliest_affected_panel_id));
-        const previousPageReady = firstPage === 0 || next.pages[firstPage - 1].panels.every(p => p.storyRevision === next.storyRevision && isPanelReady(p));
+        const previousPageReady = firstPage === 0 || next.pages[firstPage - 1].panels.every(p => artworkReady(next,p));
         let pausedNotice = '';
-        if (previousPageReady && !hasNarrativeBlocker(next)) {
+        if (previousPageReady) {
             const pagePanels = next.pages[firstPage].panels;
             const affected = pagePanels.findIndex(panel => panel.id === proposal.result.earliest_affected_panel_id);
             const firstIncomplete = pagePanels.findIndex(panel => !panel.assetId || panel.status === 'outdated' || panel.status === 'planned');
@@ -1123,48 +1128,45 @@ export function createComicService(deps: ComicDependencies) {
                     break;
                 }
                 const currentPanel = (await store.getOwned<Draft>(id, session))?.data.pages[firstPage].panels.find(p => p.id === panel.id);
-                if (!currentPanel || (currentPanel.evaluation === 'blocker' && !isPanelReady(currentPanel))) {
-                    pausedNotice = 'Story change saved. Review the panel blocker before continuing the page.';
+                if (!currentPanel) {
+                    pausedNotice = 'Story change saved, but a panel is missing.';
                     break;
                 }
             }
         }
         const latest = (await store.getOwned<Draft>(id, session))!;
-        return ({ comic: view(latest.data, (await store.getPublished<Edition>(id)), latest.revision), notice: pausedNotice || (hasNarrativeBlocker(next) ? 'Resolve the story review blockers before generating artwork.' : 'Later pages remain outdated until you review the preceding page and generate them.') });
+        return ({ comic: view(latest.data, (await store.getPublished<Edition>(id)), latest.revision), notice: pausedNotice || 'Later pages remain outdated until you generate them.' });
     }
     async function downloadPage(session: Actor, id: string, itemId: string, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
         const page = data.pages.find(p => p.id === itemId);
         if (!page)
             throw new ApplicationError('not_found', 'Page not found.');
-        if (!page.panels.length || page.panels.some(p => !p.assetId || p.storyRevision !== data.storyRevision || !isPanelReady(p)))
-            throw new ApplicationError('conflict', 'Generate and review every panel on this page before downloading.');
+        if (!page.panels.length || page.panels.some(p => !artworkReady(data,p)))
+            throw new ApplicationError('conflict', 'Generate every current panel on this page before downloading.');
         const [composed] = await composePages({ ...data, pages: [page] });
         if ((await store.getOwned<Draft>(id, session))?.revision !== revision)
             throw new ApplicationError('conflict', 'Draft changed while composing; try again.');
         return composed.image;
     }
-    async function generatePage(session: Actor, id: string, itemId: string, payload: unknown = {}, expectedRevision?: number) {
+    async function generatePage(session: Actor, id: string, itemId: string, payload: unknown = {}, expectedRevision?: number):Promise<{comic:ReturnType<typeof view>;notice?:string}> {
         if(deps.durable)return durableGeneratePage(session,id,itemId,payload,expectedRevision);
         const { data, revision } = await owned(session, id, expectedRevision);
         parse(payload, z.object({}).strict());
         requireStoryApproval(data);
-        requireClearNarrative(data);
         const pageIndex = data.pages.findIndex(p => p.id === itemId);
         if (pageIndex < 0)
             throw new ApplicationError('not_found', 'Page not found.');
-        if (pageIndex > 0 && data.pages[pageIndex - 1].panels.some(p => p.storyRevision !== data.storyRevision || !isPanelReady(p)))
+        if (pageIndex > 0 && data.pages[pageIndex - 1].panels.some(p => !artworkReady(data,p)))
             throw new ApplicationError('conflict', 'Review and accept the preceding page first.');
         const requestedPage = data.pages[pageIndex];
-        if (requestedPage.panels.some(p => p.status === 'checking'))
-            throw new ApplicationError('conflict', 'Wait for the panel review to finish.');
         let operation = data.pageOperations?.[requestedPage.id];
         if (operation && operation.storyRevision !== data.storyRevision)
             operation = undefined;
         if (!operation) {
             // A complete page click explicitly regenerates all panels. An incomplete page resumes missing/outdated panels.
-            const fullyRendered = requestedPage.panels.every(p => !!p.assetId && p.storyRevision === data.storyRevision && (p.status === 'current' || p.status === 'needs_review'));
-            const firstIncomplete = requestedPage.panels.findIndex(p => !p.assetId || p.storyRevision !== data.storyRevision || !['current', 'needs_review'].includes(p.status));
+            const fullyRendered = requestedPage.panels.every(p => artworkReady(data,p));
+            const firstIncomplete = requestedPage.panels.findIndex(p => !artworkReady(data,p));
             const targets = fullyRendered ? requestedPage.panels : requestedPage.panels.slice(firstIncomplete);
             operation = { storyRevision: data.storyRevision, baseline: Object.fromEntries(targets.map(p => [p.id, p.revision])) };
             if (!(await store.update(id, session, revision, { ...data, pageOperations: { ...data.pageOperations, [requestedPage.id]: operation } })))
@@ -1178,17 +1180,11 @@ export function createComicService(deps: ComicDependencies) {
             if (!panel)
                 throw new ApplicationError('conflict', 'Panel no longer exists.');
             if (panel.revision !== baseline) {
-                if (panel.evaluation === 'blocker' && !isPanelReady(panel))
-                    return ({ comic: view(current.data, (await store.getPublished<Edition>(id)), current.revision), notice: 'Page generation paused. Repair or explicitly accept the flagged panel before continuing.' });
-                if (panel.storyRevision === operation.storyRevision && panel.assetId && ['current', 'needs_review'].includes(panel.status))
+                if (panel.storyRevision === operation.storyRevision && artworkReady(current.data,panel))
                     continue;
                 throw new ApplicationError('conflict', 'Panel changed while drawing the page.');
             }
             await renderPanel(store, session, id, panelId);
-            const reviewed = (await store.getOwned<Draft>(id, session));
-            const finishedPanel = reviewed?.data.pages.flatMap(p => p.panels).find(p => p.id === panelId);
-            if (reviewed && finishedPanel?.evaluation === 'blocker' && !isPanelReady(finishedPanel))
-                return ({ comic: view(reviewed.data, (await store.getPublished<Edition>(id)), reviewed.revision), notice: 'Page generation paused. Repair or explicitly accept the flagged panel before continuing.' });
         }
         const latest = (await store.getOwned<Draft>(id, session))!;
         const { [requestedPage.id]: finished, ...pageOperations } = latest.data.pageOperations ?? {};
@@ -1205,9 +1201,8 @@ export function createComicService(deps: ComicDependencies) {
             z.object({ proposalId: z.string().uuid(), decision: z.literal('artwork_only') }).strict(),
         ]));
         requireStoryApproval(data);
-        requireClearNarrative(data);
         const panel = data.pages.flatMap(page => page.panels).find(panel => panel.id === itemId);
-        if (!panel || !panel.assetId || panel.storyRevision !== data.storyRevision || (panel.status === 'outdated' || panel.status === 'checking'))
+        if (!panel || !artworkReady(data,panel))
             throw new ApplicationError('conflict', 'Generate the current panel before editing its artwork.');
         let instruction: string, reviewed: z.infer<typeof panelVersionSchema>;
         if ('proposalId' in body) {
@@ -1273,8 +1268,8 @@ export function createComicService(deps: ComicDependencies) {
         if (body.expectedEditionId !== undefined && ((await store.getPublished<Edition>(id))?.editionId ?? null) !== body.expectedEditionId)
             throw new ApplicationError('conflict', 'The published edition changed. Refresh and review it again.');
         const updated = { ...data, title: body.title, creatorName: body.creator };
-        if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !p.assetId || p.storyRevision !== updated.storyRevision || !isPanelReady(p))))
-            throw new ApplicationError('conflict', 'All current panels must be generated and reviewed before publishing.');
+        if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !artworkReady(updated,p))))
+            throw new ApplicationError('conflict', 'All current panels must be generated before publishing.');
         const pageImages = await composePages(updated);
         const pages = pageImages.map(page => ({ id: page.id, assetId: deps.id(), image: page.image }));
         const composed = { ...updated, pages: updated.pages.map((page, i) => ({ ...page, composition: { assetId: pages[i].assetId, panelAssetIds: page.panels.map(panel => panel.assetId!) } })) };

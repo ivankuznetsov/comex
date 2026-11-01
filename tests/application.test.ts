@@ -146,8 +146,9 @@ describe('shared comic application', () => {
       expect(applied.storyApproval).toMatchObject({storyRevision:2,approved:true});
       expect(local.getOwned<any>(id,alice)!.data.storyApproval.storyRevision).toBe(2);
       expect(applied.storyReview?.accepted).toBe(false);
-      expect(applied.nextSteps).toContainEqual({action:'accept_story_review',fingerprint:applied.storyReview!.fingerprint!,requiresConfirmation:true});
-      await expect(service.generatePage(alice,id,'page1')).rejects.toMatchObject({code:'conflict',message:expect.stringMatching(/blocker/i)});
+      expect(applied.storyReview).toMatchObject({findings:[finding]});
+      expect(applied.nextActions).toContain('generate_page');
+      expect(applied.nextActions).not.toContain('accept_story_review');
     } finally {local.close();}
   });
 
@@ -187,18 +188,16 @@ describe('shared comic application', () => {
       local.update(id,alice,record.revision,{...record.data,...comic,storyboard,characters:[{id:'mina',name:'Mina',role:'courier',appearance:'hair',outfit:'coat',approved:true,referenceAssetId:reference}]});
       const storyView=(await service.get(alice,id)).comic, story=storyView.storyApproval!;
       await service.approveStory(alice,id,{revision:storyView.revision,storyRevision:story.storyRevision,fingerprint:story.fingerprint});
-      const paused=await service.generatePage(alice,id,'page1');
-      expect('notice' in paused && paused.notice).toContain('paused');
-      expect(imageCalls).toBe(1);
-      const flagged=paused.comic.pages[0].panels[0];
+      const firstPage=await service.generatePage(alice,id,'page1');
+      expect(imageCalls).toBe(2);
+      const flagged=firstPage.comic.pages[0].panels[0];
       expect(flagged.evaluation).toBe('blocker');
       expect(flagged.findings).toHaveLength(1);
-      await service.acceptPanel(alice,id,'p1',flagged.reviewVersion);
-      const resumed=await service.generatePage(alice,id,'page1');
-      expect(imageCalls).toBe(2);
-      await service.acceptPanel(alice,id,'p2',resumed.comic.pages[0].panels[1].reviewVersion);
+      expect(flagged.accepted).toBe(false);
+      expect(firstPage.comic.pages[0].panels.every(panel=>panel.ready)).toBe(true);
       const last=await service.generatePage(alice,id,'page2');
-      await service.acceptPanel(alice,id,'p3',last.comic.pages[1].panels[0].reviewVersion);
+      expect(imageCalls).toBe(3);
+      expect(last.comic.pages[1].panels[0].ready).toBe(true);
       const ready=(await service.get(alice,id)).comic;
       expect(ready.storyboard?.pages[0].panels[0].dialogue[0].text).toBe('The key');
       expect((await service.downloadPage(alice,id,'page1')).subarray(0,8)).toEqual(png.subarray(0,8));
@@ -237,7 +236,8 @@ describe('shared comic application', () => {
       expect(applied.comic.storyRevision).toBe(2);
       expect(applied.comic.storyApproval?.approved).toBe(true);
       expect(applied.comic.pages[0].panels[0].reviewVersion?.assetId).toBe(originalFirst.reviewVersion?.assetId);
-      expect(applied.comic.pages[0].panels[1].status).toBe('outdated');
+      expect(applied.comic.pages[0].panels[1].ready).toBe(true);
+      expect(applied.comic.pages[0].panels[1].reviewVersion?.assetId).not.toBe(edit.comic.pages[0].panels[1].reviewVersion?.assetId);
       expect(applied.comic.pages[1].status).toBe('outdated');
       expect(applied.comic.storyReview?.accepted).toBe(false);
       const fingerprint=applied.comic.storyReview?.fingerprint;

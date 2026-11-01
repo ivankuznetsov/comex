@@ -14,7 +14,7 @@ import {lockCheckpointComic,TransactionComicRepository} from './transaction-repo
 type FetchLike=NonNullable<AIOptions['fetch']>;
 export type DurableContext={
   paid<T>(step:{id:string;input:Json;expectedRevision:number},invoke:(fetch:FetchLike)=>Promise<T>):Promise<T>;
-  checkpoint<T extends Json>(key:string,work:(repository:ComicRepository)=>Promise<T>):Promise<T>;
+  checkpoint<T extends Json>(key:string,work:(repository:ComicRepository)=>Promise<T>,allowRevoked?:boolean):Promise<T>;
   load<T extends Json>(key:string):Promise<T|null>;
   assetIdFor(stepId:string):Promise<string|null>;
   stepState(stepId:string):Promise<'running'|'completed'|'failed'|'unknown'|null>;
@@ -44,8 +44,35 @@ export class PostgresComicExecutor {
     const current=()=>lease as WorkerLease;
     const renew=async()=>{lease=await this.operations.renewOperation(current(),300000);};
     const durable:DurableContext={
-      paid:async(step,invoke)=>{await renew();return this.paid.run({lease:current(),owner:operation.owner,step,expectedRevision:step.expectedRevision},invoke);},
-      checkpoint:async(key,work)=>{return await this.operations.runCheckpoint(current(),key,async client=>toJson(await work(new TransactionComicRepository(client,this.objects,operation.id))),lockCheckpointComic) as never;},
+      paid:async(step,invoke)=>{
+        await renew();
+        const stored=await this.operations.getStep(operation.owner,operation.id,step.id);
+        if(!stored || (stored.state!=='completed' && stored.state!=='failed'))return this.paid.run({lease:current(),owner:operation.owner,step,expectedRevision:step.expectedRevision},invoke);
+        // Replay a known paid result without asking a revoked grant to dispatch
+        // again. The repository still checks the lease and the original input
+        // digest, while this transaction fences the owned comic revision.
+        const replay=await this.operations.claimPaidStep(current(),{id:step.id,input:step.input},async(client,context)=>{
+          if(context.operation.owner!==operation.owner || context.operation.targetId!==operation.targetId)throw new ApplicationError('not_found','Comic not found.');
+          const comic=(await client.query('SELECT owner,revision,import_batch_id FROM comics WHERE id=$1',[operation.targetId])).rows[0];
+          if(!comic || comic.owner!==operation.owner || comic.import_batch_id!==null)throw new ApplicationError('not_found','Comic not found.');
+          if(comic.revision!==step.expectedRevision)throw new ApplicationError('conflict','This draft changed. Refresh and try again.');
+          const saved=(await client.query('SELECT state FROM operation_steps WHERE operation_id=$1 AND step_id=$2',[operation.id,step.id])).rows[0];
+          if(!saved || !['completed','failed'].includes(saved.state))throw new Error('A saved provider result is unavailable.');
+        });
+        if(replay.kind==='failed')throw new AIError('provider_error','The previous provider attempt failed.');
+        if(replay.kind!=='completed')throw new AIError('unknown_outcome','The provider outcome is unknown; resolve it before retrying.');
+        const result=replay.result as {format?:string;value?:Json;assetId?:string}|null;
+        if(result?.format==='json' && 'value' in result)return result.value as never;
+        if(result?.format==='private_asset' && typeof result.assetId==='string')return await this.assets.read(result.assetId) as never;
+        throw new Error('The stored provider result is unavailable.');
+      },
+      checkpoint:async(key,work,allowRevoked=false)=>{return await this.operations.runCheckpoint(current(),key,async(client,context)=>{
+        if(!allowRevoked && context.operation.grantId){
+          const active=await client.query(`SELECT g.id FROM mcp_grants g JOIN "session" s ON s.id=g.session_id AND s."userId"=g.user_id WHERE g.id=$1 AND g.owner=$2 AND g.revoked_at IS NULL AND s."expiresAt">now() FOR UPDATE OF g`,[context.operation.grantId,context.operation.owner]);
+          if(!active.rowCount)throw new Error('The connection was revoked or expired.');
+        }
+        return toJson(await work(new TransactionComicRepository(client,this.objects,operation.id)));
+      },lockCheckpointComic) as never;},
       load:async(key)=>await this.operations.getCheckpoint(operation.owner,operation.id,key) as never,
       assetIdFor:async(stepId)=>await this.paid.assetIdFor(operation.owner,operation.id,stepId),
       stepState:async(stepId)=>(await this.operations.getStep(operation.owner,operation.id,stepId))?.state ?? null,

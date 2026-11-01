@@ -147,11 +147,16 @@ export abstract class BaseOperations<Tx> implements OperationRepository<Tx> {
     const value:Json=yield {kind:'work',work,context:{phase:'checkpoint',operation:operation(r.rows[0]),stepId:key}};
     yield query('INSERT INTO operation_checkpoints(operation_id,checkpoint_key,value_json) VALUES (?,?,?)',lease.operationId,key,canonical(value));return value;
   })());}
-  claimPaidStep(lease:WorkerLease,provided:{id:string;input:Json},policy:TransactionPolicy<Tx>){const budget=this.budget,step={id:provided.id,input:fromJson(canonical(provided.input)) as Json};return this.transact((function*():Program<Tx,StepClaim>{
+  claimPaidStep(lease:WorkerLease,provided:{id:string;input:Json},policy:TransactionPolicy<Tx>,beforeLock?:TransactionPolicy<Tx>){const budget=this.budget,step={id:provided.id,input:fromJson(canonical(provided.input)) as Json};return this.transact((function*():Program<Tx,StepClaim>{
+    if(beforeLock){
+      const now:number=yield nowEffect,prior:QueryResult=yield query('SELECT * FROM operations WHERE id=?',lease.operationId);leased(prior.rows[0],lease,now);
+      yield policyEffect(beforeLock,{phase:'paid_step',operation:operation(prior.rows[0]),stepId:step.id,stepInput:step.input});
+    }
     const now:number=yield nowEffect,r:QueryResult=yield query('SELECT * FROM operations WHERE id=? FOR UPDATE',lease.operationId);leased(r.rows[0],lease,now);
     const stepDigest=digest(step.input),prior:QueryResult=yield query('SELECT * FROM operation_steps WHERE operation_id=? AND step_id=?',lease.operationId,step.id);
-    if(prior.rows.length){const row=prior.rows[0];if(row.input_digest!==stepDigest)throw new OperationError('step_conflict','The step ID was used with different input.');return {kind:row.state,reservationId:row.reservation_id,result:fromJson(row.result_json)};}
+    if(prior.rows.length&&prior.rows[0].input_digest!==stepDigest)throw new OperationError('step_conflict','The step ID was used with different input.');
     yield policyEffect(policy,{phase:'paid_step',operation:operation(r.rows[0]),stepId:step.id,stepInput:step.input});
+    if(prior.rows.length){const row=prior.rows[0];return {kind:row.state,reservationId:row.reservation_id,result:fromJson(row.result_json)};}
     checkBudget(budget);yield budgetLock;
     const counts:QueryResult=yield query("SELECT count(*) AS used, coalesce(sum(CASE WHEN state IN ('running','unknown') THEN 1 ELSE 0 END),0) AS active FROM provider_reservations");
     if(typeof budget.maxCalls==='number' && Number(counts.rows[0].used)>=budget.maxCalls)throw new BudgetError('budget_exhausted','The configured AI call budget is exhausted.');

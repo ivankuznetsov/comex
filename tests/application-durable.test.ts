@@ -71,21 +71,26 @@ describe('durable comic phases',()=>{
     }
     try {const browser=await run(local),worker=await run(durable);expect(worker).toEqual(browser);expect(worker.questions.map(q=>[q.question,q.suggestedAnswer])).toEqual([['Who gets the key?','Her brother'],['Why now?','The tide is rising']]);expect(worker.suggestions).toHaveLength(1);}finally{local.local.close();durable.local.close();}
   });
-  test('local and durable paths preserve explicit story and panel blocker choices',async()=>{
+  test('local and durable paths treat story and panel findings as advisory',async()=>{
     const finding={severity:'blocker',dimension:'continuity',panel_id:'p1',character_id:null,reference_id:null,expected:'key',observed:'missing',repair:'fix'};
     const judge=async()=>({outcome:'findings',findings:[finding]});
     const browser=fixture({visualJudge:judge},false),worker=fixture({visualJudge:judge},true);
     async function run(f:ReturnType<typeof fixture>,isDurable:boolean) {
       const id=await planned(f),record=f.local.getOwned<any>(id,owner)!;f.local.update(id,owner,record.revision,{...record.data,storyReview:{outcome:'findings',findings:[finding]}});
-      await expect(f.service.generatePage(owner,id,'page1',isDurable?{intent:'generate'}:{})).rejects.toMatchObject({code:'conflict'});
-      const review=(await f.service.get(owner,id)).comic.storyReview!;expect(review.accepted).toBe(false);
-      const accepted=(await f.service.acceptStoryReview(owner,id,{fingerprint:review.fingerprint})).comic;expect(accepted.storyReview?.accepted).toBe(true);
-      const page=await f.service.generatePage(owner,id,'page1',isDurable?{intent:'generate'}:{}),panel=page.comic.pages[0].panels[0];
-      expect(panel.evaluation).toBe('blocker');expect(page.notice).toMatch(/paused/i);
-      const after=(await f.service.acceptPanel(owner,id,'p1',panel.reviewVersion!)).comic;expect(after.pages[0].panels[0].accepted).toBe(true);
-      return {evaluation:panel.evaluation,outcome:panel.reviewOutcome,accepted:after.pages[0].panels[0].accepted,choices:page.comic.nextActions};
+      const page=await f.service.generatePage(owner,id,'page1',isDurable?{intent:'generate'}:{});
+      expect(page.comic.pages[0].panels.every(panel=>!!panel.imageUrl)).toBe(true);expect(page.comic.pages[0].panels[0].evaluation).toBe('blocker');expect(page.notice).toBeUndefined();
+      return page.comic.pages[0].panels.map(panel=>({evaluation:panel.evaluation,outcome:panel.reviewOutcome}));
     }
     try{expect(await run(worker,true)).toEqual(await run(browser,false));}finally{browser.local.close();worker.local.close();}
+  });
+  test('current checking artwork can be used to resume the next panel',async()=>{
+    const f=fixture();try{
+      const id=await planned(f),record=f.local.getOwned<any>(id,owner)!,image=randomUUID();f.files.set(image,png);
+      const pages=record.data.pages.map((page:any)=>({...page,panels:page.panels.map((panel:any)=>panel.id==='p1'?{...panel,assetId:image,revision:panel.revision+1,status:'checking',evaluation:'uncertain'}:panel)}));
+      f.local.update(id,owner,record.revision,{...record.data,pages});
+      const result=await f.service.generatePage(owner,id,'page1',{intent:'resume'},f.local.getOwned(id,owner)!.revision);
+      expect(result.comic.pages[0].panels[0].imageUrl).toContain(image);expect(result.comic.pages[0].panels[1].imageUrl).toBeTruthy();expect(f.calls.filter(call=>call==='panel')).toHaveLength(1);
+    }finally{f.local.close();}
   });
   test('a crash after paid initial questions resumes the same output and original revision',async()=>{
     const f=fixture();try {
@@ -257,13 +262,15 @@ describe('durable comic phases',()=>{
       await expect(f.service.editPanel(owner,id,'p1',input,revision)).rejects.toMatchObject({code:'conflict'});
     }finally{f.local.close();}
   });
-  test('a new resume operation continues after the creator accepts a blocker',async()=>{
+  test('a new resume operation continues after an advisory blocker without acceptance',async()=>{
     const blocker={severity:'blocker',dimension:'continuity',panel_id:'p1',character_id:null,reference_id:null,expected:'key',observed:'missing',repair:'fix'};let reviews=0;
     const f=fixture({async visualJudge(){f.calls.push('visual');reviews++;return reviews===1?{outcome:'findings',findings:[blocker]}:{outcome:'pass',findings:[]};}});try {
-      const id=await planned(f),first=await f.service.generatePage(owner,id,'page1',{intent:'generate'}),panel=first.comic.pages[0].panels[0];
-      expect(first.notice).toMatch(/paused/i);await f.service.acceptPanel(owner,id,'p1',panel.reviewVersion!);f.reset();
+      const id=await planned(f),revision=f.local.getOwned(id,owner)!.revision;f.crashAt('checkpoint:panel/p1/reviewed');
+      await expect(f.service.generatePage(owner,id,'page1',{intent:'generate'},revision)).rejects.toBeInstanceOf(Crash);
+      const first=(await f.service.get(owner,id)).comic.pages[0].panels[0];expect(first.evaluation).toBe('blocker');expect(first.accepted).toBe(false);f.reset();
       const continued=await f.service.generatePage(owner,id,'page1',{intent:'resume'},f.local.getOwned(id,owner)!.revision);
-      expect(continued.comic.pages[0].panels[0].accepted).toBe(true);expect(continued.comic.pages[0].panels[1].imageUrl).toBeTruthy();expect(f.calls.filter(c=>c==='panel')).toHaveLength(2);
+      expect(continued.comic.pages[0].panels[0].reviewVersion?.assetId).toBe(first.reviewVersion?.assetId);expect(continued.comic.pages[0].panels[0].accepted).toBe(false);
+      expect(continued.comic.pages[0].panels[1].imageUrl).toBeTruthy();expect(f.calls.filter(c=>c==='panel')).toHaveLength(2);
     }finally{f.local.close();}
   });
   test('a changed rendered panel is never adopted by page replay',async()=>{
@@ -291,7 +298,8 @@ describe('durable comic phases',()=>{
       f.crashAt(`checkpoint:revision/${preview.id}/applied`);await expect(f.service.applyRevision(owner,id,{proposalId:preview.id},revision)).rejects.toBeInstanceOf(Crash);
       expect(f.local.getOwned<any>(id,owner)!.data.pendingRevision).toBeUndefined();
       const result=await f.service.applyRevision(owner,id,{proposalId:preview.id},revision);expect(result.comic.storyRevision).toBe(2);expect(result.comic.storyReview?.accepted).toBe(false);
-      expect(f.calls).toEqual(['revision','narrative']);
+      expect(result.comic.pages[0].panels.every(panel=>!!panel.imageUrl)).toBe(true);
+      expect(f.calls).toEqual(['revision','narrative','panel','visual','panel','visual']);
     }finally{f.local.close();}
   });
   test('revocation before visual review keeps the image and stops before another panel',async()=>{

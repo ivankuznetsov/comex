@@ -1,5 +1,7 @@
 import {expect,test} from '@playwright/test';
 
+test.skip(process.env.COMEX_E2E_MODE!=='hosted','Requires the isolated hosted-mode test server.');
+
 test.beforeEach(async({page})=>{await page.route('**/api/auth/session',route=>route.fulfill({json:{user:{email:'creator@example.test'},guest:null,workspaceId:'workspace-a'}}));});
 
 test('hosted editor restores jobs, asks the saved questions and requires each approval',async({browser})=>{

@@ -1,11 +1,11 @@
 import {expect,test} from 'bun:test';
 import {randomUUID} from 'node:crypto';
+import {readFile,readdir} from 'node:fs/promises';
 import {Pool,type PoolClient} from 'pg';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {createComicService} from '../src/lib/application/comics';
 import type {ComicDependencies,Draft} from '../src/lib/application/contracts';
 import {PostgresAssets,type PrivateObjects} from '../src/lib/storage/assets';
-import {applyMigrations} from '../src/lib/storage/postgres';
 import {PostgresOperationCoordinator,type MutationAction,type OperationIdentity} from '../src/lib/operations/coordinator';
 import {PostgresComicExecutor,type DurableContext} from '../src/lib/operations/executor';
 import {PostgresOperationRepository} from '../src/lib/operations/postgres';
@@ -60,11 +60,11 @@ class FakeProvider {
 }
 
 async function fixture() {
-  const schema=`comex_real_${randomUUID().replaceAll('-','')}`,admin=new Pool({connectionString:process.env.TEST_DATABASE_URL});
+  const schema=`comex_worker_recovery_${randomUUID().replaceAll('-','')}`,admin=new Pool({connectionString:process.env.TEST_DATABASE_URL});
   await admin.query(`CREATE SCHEMA "${schema}"`);
   const pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,options:`-c search_path=${schema}`});
   try {
-    await applyMigrations(pool);
+    for(const file of (await readdir('db/migrations')).filter(name=>/^\d+_[a-z0-9_]+\.sql$/.test(name)).sort())await pool.query(await readFile(`db/migrations/${file}`,'utf8'));
     for(const [user,session,grant,actor] of [['user','session','grant',owner],['other-user','other-session','other-grant',otherOwner]]) {
       await pool.query('INSERT INTO "user"(id,name,email,"emailVerified") VALUES ($1,$2,$3,true)',[user,user,`${user}@example.test`]);
       await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","updatedAt") VALUES ($1,$2,$3,now()+interval \'1 hour\',now())',[session,`${session}-token`,user]);
@@ -74,9 +74,10 @@ async function fixture() {
     const objects:PrivateObjects={put:async(path,bytes)=>{files.set(path,Buffer.from(bytes));return path;},read:async(path)=>{const bytes=files.get(path);if(!bytes)throw new Error('Missing private object');return Buffer.from(bytes);},delete:async(path)=>{files.delete(path);}};
     const assets=new PostgresAssets(pool,objects),repo=new PostgresOperationRepository(pool,{maxCalls:30,maxConcurrent:1}),provider=new FakeProvider();
     const coordinator=new PostgresOperationCoordinator(pool,repo);
-    let gate:{key:string;once:boolean;control:ReturnType<typeof pause>}|undefined;
+    let gate:{key:string;once:boolean;control:ReturnType<typeof pause>}|undefined,failRenew=false;
     const intercepted=new Proxy(repo,{get(target,key){
       const value=Reflect.get(target,key,target);
+      if(key==='renewOperation')return async(...args:Parameters<typeof target.renewOperation>)=>{if(failRenew){failRenew=false;throw new Error('Simulated pre-dispatch infrastructure failure');}return target.renewOperation(...args);};
       if(key==='runCheckpoint')return async(lease:WorkerLease,checkpointKey:string,work:TransactionWork<PoolClient>,beforeLock?:TransactionPolicy<PoolClient>)=>{
         if(gate?.key===checkpointKey&&!gate.once){gate.once=true;gate.control.signal();await gate.control.wait;}
         return target.runCheckpoint(lease,checkpointKey,work,beforeLock);
@@ -102,7 +103,7 @@ async function fixture() {
       finally {if(timer)clearTimeout(timer);}
     }
     async function close(){await pool.end();await admin.query(`DROP SCHEMA "${schema}" CASCADE`);await admin.end();}
-    return {pool,repo,coordinator,provider,executor,assets,objects,files,comic,enqueue,execute,gateCheckpoint,waitUntilReached,close};
+    return {pool,repo,coordinator,provider,executor,assets,objects,files,comic,enqueue,execute,gateCheckpoint,waitUntilReached,close,failNextRenew:()=>{failRenew=true;}};
   } catch(error){await pool.end();await admin.query(`DROP SCHEMA "${schema}" CASCADE`);await admin.end();throw error;}
 }
 
@@ -301,4 +302,54 @@ pgTest('grant revocation after story dispatch prevents the undispatched narrativ
   expect(await h.repo.getStep(owner,job.id,'story/narrative')).toBeNull();
   expect(h.provider.calls.filter(c=>c==='narrative_judgment')).toHaveLength(0);
   expect((await h.pool.query('SELECT count(*)::int AS n FROM comic_text_operations WHERE comic_id=$1',[id])).rows[0].n).toBe(0);
+}));
+
+async function preparedPage(h:Awaited<ReturnType<typeof fixture>>) {
+  const id=(await h.execute('create',creation)).ticket.id;
+  await h.execute('initialQuestions',{},id);await h.execute('addCharacter',card,id);
+  const character=(await h.comic(id)).draft.characters[0];await h.execute('generateReference',{characterId:character.id},id);
+  await h.execute('approveCharacter',{characterId:character.id,assetId:(await h.comic(id)).draft.characters[0].referenceAssetId!},id);
+  const story=await h.execute('planStory',{},id),view=(story.op.result as any).comic;
+  await h.execute('approveStory',{storyRevision:view.storyRevision,fingerprint:view.storyApproval.fingerprint},id);
+  return id;
+}
+pgTest('pre-dispatch infrastructure failure releases its own text lock',async()=>runWithFixture(async h=>{
+  const id=(await h.execute('create',creation)).ticket.id,job=await h.enqueue('initialQuestions',{},id);h.failNextRenew();
+  await h.executor.execute(job.id);
+  expect((await h.repo.getOwned(owner,job.id))?.status).toBe('failed');
+  expect((await h.comic(id)).draft.initialQuestions).toBe('failed');
+  expect((await h.pool.query('SELECT count(*)::int n FROM comic_text_operations WHERE comic_id=$1',[id])).rows[0].n).toBe(0);
+  expect(await h.repo.getStep(owner,job.id,'initial/questions')).toBeNull();expect(h.provider.calls).toEqual([]);
+}));
+pgTest('pre-dispatch missing reference blob releases its panel marker',async()=>runWithFixture(async h=>{
+  const id=await preparedPage(h),page=(await h.comic(id)).draft.pages[0];h.files.clear();
+  const job=await h.enqueue('generatePage',{pageId:page.id,intent:'generate'},id);await h.executor.execute(job.id);
+  const draft=(await h.comic(id)).draft,op=await h.repo.getOwned(owner,job.id);
+  expect(op?.status).toBe('failed');expect(draft.operations?.[`panel:${page.panels[0].id}`]).toBeUndefined();
+  expect(await h.repo.getStep(owner,job.id,`panel/${page.panels[0].id}/image`)).toBeNull();expect(h.provider.calls.filter(x=>x==='panel_image')).toHaveLength(0);
+}));
+pgTest('revocation before artwork choice checkpoint preserves the pending choice',async()=>runWithFixture(async h=>{
+  const id=await preparedPage(h),page=(await h.comic(id)).draft.pages[0];await h.execute('generatePage',{pageId:page.id,intent:'generate'},id);
+  const current=await h.comic(id),panel=current.draft.pages[0].panels[0],proposalId=randomUUID();
+  const proposal={id:proposalId,panelId:panel.id,instruction:'Change the lighting',assetId:panel.assetId!,storyRevision:panel.storyRevision,panelRevision:panel.revision,expiresAt:Date.now()+60000,intent:'uncertain' as const};
+  await h.pool.query('UPDATE comics SET draft=$2,revision=revision+1 WHERE id=$1',[id,JSON.stringify({...current.draft,pendingArtworkDecision:proposal})]);
+  const job=await h.enqueue('editPanel',{panelId:panel.id,proposalId,decision:'artwork_only'},id),gate=h.gateCheckpoint(`edit/${panel.id}/decision-cleared`),worker=h.executor.execute(job.id);
+  try {await h.waitUntilReached(gate,worker);await h.pool.query("UPDATE mcp_grants SET revoked_at=1 WHERE id='grant'");}finally{gate.release();await worker;}
+  expect((await h.repo.getOwned(owner,job.id))?.status).toBe('revoked');expect((await h.comic(id)).draft.pendingArtworkDecision).toEqual(proposal);
+}));
+
+pgTest('revocation after dispatch permits reference association',async()=>runWithFixture(async h=>{
+  const id=(await h.execute('create',creation)).ticket.id;await h.execute('addCharacter',card,id);
+  const character=(await h.comic(id)).draft.characters[0],gate=pause();h.provider.paused={name:'character_reference',gate};
+  const job=await h.enqueue('generateReference',{characterId:character.id},id),worker=h.executor.execute(job.id);
+  try{await h.waitUntilReached({reached:gate.reached,release:gate.release},worker);await h.pool.query("UPDATE mcp_grants SET revoked_at=1 WHERE id='grant'");}finally{gate.release();await worker;}
+  expect((await h.repo.getOwned(owner,job.id))?.status).toBe('succeeded');expect((await h.comic(id)).draft.characters[0].referenceAssetId).toBeTruthy();
+  expect(h.provider.calls.filter(x=>x==='character_reference')).toHaveLength(1);
+}));
+pgTest('saved dispatched reference replays and associates after grant revocation',async()=>runWithFixture(async h=>{
+  const id=(await h.execute('create',creation)).ticket.id;await h.execute('addCharacter',card,id);
+  const character=(await h.comic(id)).draft.characters[0],job=await h.enqueue('generateReference',{characterId:character.id},id),gate=h.gateCheckpoint(`character/${character.id}/associated`),first=h.executor.execute(job.id);
+  try{await h.waitUntilReached(gate,first);await h.pool.query('UPDATE operations SET lease_until=0 WHERE id=$1',[job.id]);await h.pool.query("UPDATE mcp_grants SET revoked_at=1 WHERE id='grant'");await h.executor.execute(job.id);}finally{gate.release();await first;}
+  expect((await h.repo.getOwned(owner,job.id))?.status).toBe('succeeded');expect((await h.comic(id)).draft.characters[0].referenceAssetId).toBeTruthy();
+  expect(h.provider.calls.filter(x=>x==='character_reference')).toHaveLength(1);
 }));

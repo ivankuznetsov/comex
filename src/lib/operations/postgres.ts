@@ -8,6 +8,9 @@ import {lockCheckpointComic} from './transaction-repository';
 /** Policies receive the same client and may lock the active grant and target rows. */
 export class PostgresOperationRepository extends BaseOperations<PoolClient> {
   constructor(private pool:Pool,budget:BudgetConfig){super(budget);}
+  override claimPaidStep(lease:WorkerLease,step:{id:string;input:Json},policy:TransactionPolicy<PoolClient>,beforeLock:TransactionPolicy<PoolClient>=lockCheckpointComic) {
+    return super.claimPaidStep(lease,step,policy,beforeLock);
+  }
   override runCheckpoint(lease:WorkerLease,key:string,work:TransactionWork<PoolClient>,beforeLock:TransactionPolicy<PoolClient>=lockCheckpointComic) {
     return super.runCheckpoint(lease,key,work,beforeLock);
   }

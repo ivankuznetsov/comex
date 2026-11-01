@@ -39,7 +39,7 @@ export interface OperationRepository<Tx> {
   releaseUnknown(lease:WorkerLease):MaybePromise<void>;
   getLeased(lease:WorkerLease):MaybePromise<Operation>;
   runCheckpoint(lease:WorkerLease,key:string,work:TransactionWork<Tx>,beforeLock?:TransactionPolicy<Tx>):MaybePromise<Json>;
-  claimPaidStep(lease:WorkerLease,step:{id:string;input:Json},policy:TransactionPolicy<Tx>):MaybePromise<StepClaim>;
+  claimPaidStep(lease:WorkerLease,step:{id:string;input:Json},policy:TransactionPolicy<Tx>,beforeLock?:TransactionPolicy<Tx>):MaybePromise<StepClaim>;
   /** Only the claimant that has not invoked a provider may cancel this reservation. */
   cancelUndispatchedStep(lease:WorkerLease,stepId:string,reservationId:string):MaybePromise<void>;
   completePaidStep(lease:WorkerLease,stepId:string,state:'completed'|'failed'|'unknown',result:Json|null):MaybePromise<void>;

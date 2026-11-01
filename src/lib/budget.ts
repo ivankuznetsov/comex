@@ -103,6 +103,8 @@ export function finalizeBudgetedResponse(response: Response, state: 'completed' 
 export function createBudgetedFetch(path: string, fetcher: FetchLike = globalThis.fetch,
   config?: BudgetConfig): FetchLike {
   return async (input, init) => {
+    // A fresh SQLite memory database on each call silently discards the budget.
+    if (path === ':memory:') throw new BudgetError('budget_not_configured', 'Use a persistent database for provider call accounting.');
     const budget = new ProviderBudget(path, config ?? budgetFromEnvironment());
     let reservation: string;
     try { reservation = budget.reserve(); } catch (error) { budget.close(); throw error; }

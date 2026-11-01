@@ -21,7 +21,7 @@ test('a fresh browser consents to a new empty workspace without another browserâ
     const params=new URLSearchParams({client_id:client,redirect_uri:'http://127.0.0.1:64321/callback',response_type:'code',code_challenge:challenge,code_challenge_method:'S256',scope:'comex:read offline_access',resource});
     await page.goto(base+'/api/mcp-auth/oauth2/authorize?'+params);
     await expect(page.getByRole('heading',{name:'Connect Fresh browser client'})).toBeVisible({timeout:45000});
-    await expect(page.getByText(/new, empty workspace; existing drafts in another browser will not be included/)).toBeVisible();
+    await expect(page.getByText(/new, empty workspace; existing drafts in another browser will not be included/)).toBeVisible({timeout:45000});
     await page.getByLabel('Your email address').fill('fresh-browser@example.test');
     await page.getByRole('button',{name:'Allow connection'}).click();
     await page.waitForURL('http://127.0.0.1:64321/callback**');

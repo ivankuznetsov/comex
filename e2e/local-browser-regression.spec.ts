@@ -1,5 +1,7 @@
 import {expect,test} from '@playwright/test';
 
+test.skip(process.env.COMEX_E2E_MODE==='hosted','Requires the isolated local-mode test server.');
+
 test('local creation keeps its existing API flow without hosted receipts',async({page})=>{
   let creates=0,operations=0;
   const comic={id:'local-test',title:'Local draft',plot:'A local courier carries a key.',style:'ink-manga',revision:1,storyRevision:1,characters:[],questions:[],answers:{},initialQuestions:'complete',initialSuggestions:'complete',pages:[]};

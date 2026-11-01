@@ -9,7 +9,9 @@ execution: code
 
 # Comex MCP Comic Creation - Plan
 
-> **Creator clarification during implementation:** MCP should offer the same questions and review choices as the editor. The editor permits explicit, version-bound acceptance of narrative and panel blockers, so that behavior supersedes the blocker restrictions in R6 and U4 below.
+> Planning artifact only. Later user decisions supersede any requirement for mandatory panel-review acceptance.
+
+> **Creator clarification during implementation:** MCP should offer the same questions and review choices as the current editor, superseding conflicting requirements below.
 
 ## Goal Capsule
 

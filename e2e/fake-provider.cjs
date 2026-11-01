@@ -17,6 +17,13 @@ globalThis.fetch = async (input, init) => {
   }
   if (!url.startsWith('https://api.openai.com/v1/')) return originalFetch(input, init);
   if (url.includes('/images/')) {
+    const fs=require('node:fs'), path=require('node:path');
+    const hold=path.join(process.env.COMEX_E2E_MAILBOX,'hold-image');
+    const count=path.join(process.env.COMEX_E2E_MAILBOX,'image-count');
+    fs.appendFileSync(count,'1\n');
+    const deadline=Date.now()+30_000;
+    while (fs.existsSync(hold) && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,25));
+    if (fs.existsSync(hold)) throw new Error('Timed out waiting for test image release');
     const prompt = typeof init.body === 'string' ? JSON.parse(init.body).prompt : init.body.get('prompt');
     if (String(prompt).includes('Retryref') && !require('node:fs').existsSync(require('node:path').join(process.env.COMEX_E2E_MAILBOX, 'allow-reference'))) {
       return Response.json({error:{message:'Simulated reference failure'}},{status:400});

@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import type {AIOptions, createAIService, RevisionResult, Storyboard} from '../ai/service';
+import type {AIOptions, createAIService, Reference, RevisionResult, Storyboard} from '../ai/service';
 import type {ComicDraft} from '../domain/comic';
 
 export type Actor = string;
@@ -16,14 +16,14 @@ export interface DurableComicContext {
 export type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string; referenceAssetId?: string; approved: boolean};
 export type PanelReview = {assetId:string; storyRevision:number; panelRevision:number; outcome:'pass' | 'findings' | 'inconclusive' | 'failed'};
 export type SuggestedCharacter = {id:string; name:string; role:string; appearance:string; outfit:string};
-export type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; initialQuestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; characterSuggestions?: SuggestedCharacter[]; initialSuggestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; panelsPerPage?: number; pageLayout?: 'stack' | 'grid'; storyboard?: Storyboard; storyReview?: unknown; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; baseStoryRevision?:number; result:RevisionResult}; pendingArtworkDecision?: {id:string;panelId:string;instruction:string;assetId:string;storyRevision:number;panelRevision:number;expiresAt:number;reason?:string;intent?:'uncertain' | 'story'}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>; durableOperationMarkers?: Record<string,string>};
+export type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; initialQuestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; characterSuggestions?: SuggestedCharacter[]; initialSuggestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; panelsPerPage?: number; pageLayout?: 'stack' | 'grid'; storyboard?: Storyboard; storyReview?: unknown; storyReviewRunId?: string; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; baseStoryRevision?:number; result:RevisionResult}; pendingArtworkDecision?: {id:string;panelId:string;instruction:string;assetId:string;storyRevision:number;panelRevision:number;expiresAt:number;reason?:string;intent?:'uncertain' | 'story'}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>; durableOperationMarkers?: Record<string,string>};
 export type PageIntent = 'generate'|'resume'|'regenerate';
 /** The same precondition is checked at enqueue and at durable execution. */
 export function pageIntentMatches(draft:Draft,pageId:string,intent:PageIntent):boolean {
   const page=draft.pages.find(p=>p.id===pageId);if(!page)return false;
   const pending=draft.pageOperations?.[page.id]?.storyRevision===draft.storyRevision;
   const progress=page.panels.some(p=>!!p.assetId)||pending;
-  const complete=page.panels.length>0&&page.panels.every(p=>!!p.assetId&&p.storyRevision===draft.storyRevision&&['current','needs_review'].includes(p.status));
+  const complete=page.panels.length>0&&page.panels.every(p=>!!p.assetId&&p.storyRevision===draft.storyRevision&&['current','needs_review','checking'].includes(p.status));
   return intent==='generate'?!progress:intent==='resume'?pending||(progress&&!complete):complete&&!pending;
 }
 export type Edition = {id: string; title: string; creator: string; editionId: string; sourceRevision: number; pages: {id: string; imageUrl: string; storage?: 'sqlite'}[]};
@@ -55,6 +55,11 @@ export interface ComicDependencies {
   provider(options:{fetch:NonNullable<AIOptions['fetch']>}): ReturnType<typeof createAIService>;
   budgetFetch: NonNullable<AIOptions['fetch']>;
   durable?: DurableComicContext;
+  /** Local schedulers persist version-bound advisory results after the draft commit. */
+  advisory?: {
+    narrative(draft:Draft):void;
+    visual(input:{draft:Draft;panelId:string;assetId:string;panelRevision:number;bible:Storyboard['bible'];styleRules:string;beats:Omit<Storyboard['pages'][number]['panels'][number],'dialogue'>;references:Reference[]}):void;
+  };
   id(): string;
 }
 export type ApplicationErrorCode = 'invalid_input' | 'not_found' | 'conflict' | 'invalid_story' | 'invalid_provider_response';
