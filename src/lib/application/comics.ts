@@ -276,7 +276,7 @@ export function createComicService(deps: ComicDependencies) {
         await resumeText('story',session,id,['plan','narrative']);
         try {
             let latest=await current(session,id);if(latest.revision!==base.revision)throw new ApplicationError('conflict','Draft changed while planning the story.');
-            const input={plot:base.data.plot,answers:answeredQuestions(base.data),styleRules:styleRules(base.data.styleId),characters:base.data.characters,pageCount:3,panelsPerPage:base.data.panelsPerPage??3};
+            const input={plot:base.data.plot,answers:answeredQuestions(base.data),styleRules:styleRules(base.data.styleId),characters:base.data.characters,pageCount:base.data.pageCount??3,panelsPerPage:base.data.panelsPerPage??3};
             const generated=await durable().paid({id:'story/plan',input:asJson(input),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).storyboard(input));
             const storyboard={...generated,pages:generated.pages.map(page=>({...page,panels:page.panels.map(normalizePanelLedger)}))};
             const errors=validateStoryLedger(storyboard);if(errors.length)throw new ApplicationError('invalid_story',`Story state needs correction: ${errors[0]}`);
@@ -713,7 +713,7 @@ export function createComicService(deps: ComicDependencies) {
     async function create(session: Actor, payload: unknown) {
         const body = parse(payload, createSchema);
         const id = deps.id();
-        const draft: Draft = { ...createBlankComic(id, session), title: body.title, plot: body.plot, styleId: body.style, characters: [], answers: {}, questions: [], initialQuestions: 'pending', initialSuggestions: 'pending' };
+        const draft: Draft = { ...createBlankComic(id, session), title: body.title, plot: body.plot, styleId: body.style, pageCount: body.pageCount ?? 3, characters: [], answers: {}, questions: [], initialQuestions: 'pending', initialSuggestions: 'pending' };
         (await store.create(id, session, draft));
         return { comic: { id } };
     }
@@ -759,9 +759,11 @@ export function createComicService(deps: ComicDependencies) {
         const body = parse(payload, patchSchema);
         if (data.pages.length && ((body.plot !== undefined && body.plot !== data.plot) || (body.style !== undefined && body.style !== data.styleId) || (body.answers !== undefined && !sameJson(body.answers,data.answers))))
             throw new ApplicationError('conflict', 'Change the story through the revision flow so later pages can be updated.');
+        if (data.pages.length && body.pageCount !== undefined && body.pageCount !== (data.pageCount ?? data.pages.length))
+            throw new ApplicationError('conflict', 'Choose the number of pages before planning the story.');
         if (data.pages.length && body.panelsPerPage !== undefined && body.panelsPerPage !== (data.panelsPerPage ?? 3))
             throw new ApplicationError('conflict', 'Choose the number of panels before planning the story.');
-        const updated: Draft = { ...data, title: body.title ?? data.title, plot: body.plot ?? data.plot, styleId: body.style ?? data.styleId, answers: body.answers ?? data.answers, panelsPerPage: body.panelsPerPage ?? data.panelsPerPage, pageLayout: body.pageLayout ?? data.pageLayout };
+        const updated: Draft = { ...data, title: body.title ?? data.title, plot: body.plot ?? data.plot, styleId: body.style ?? data.styleId, answers: body.answers ?? data.answers, pageCount: body.pageCount ?? data.pageCount, panelsPerPage: body.panelsPerPage ?? data.panelsPerPage, pageLayout: body.pageLayout ?? data.pageLayout };
         return ({ comic: (await save(store, session, revision, updated)) });
     }
     async function initialQuestions(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
@@ -900,7 +902,7 @@ export function createComicService(deps: ComicDependencies) {
         if (data.characters.some(c => data.operations?.[`character:${c.id}`]))
             throw new ApplicationError('conflict', 'Resolve character reference requests before planning the story.');
         return await withTextOperation(store, session, id, revision, async () => {
-            const generated = await ai().storyboard({ plot: data.plot, answers: answeredQuestions(data), styleRules: styleRules(data.styleId), characters: data.characters, pageCount: 3, panelsPerPage: data.panelsPerPage ?? 3 });
+            const generated = await ai().storyboard({ plot: data.plot, answers: answeredQuestions(data), styleRules: styleRules(data.styleId), characters: data.characters, pageCount: data.pageCount ?? 3, panelsPerPage: data.panelsPerPage ?? 3 });
             const storyboard = { ...generated, pages: generated.pages.map(page => ({ ...page, panels: page.panels.map(normalizePanelLedger) })) };
             const ledgerErrors = validateStoryLedger(storyboard);
             if (ledgerErrors.length)

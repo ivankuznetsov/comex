@@ -175,6 +175,46 @@ describe('durable comic phases',()=>{
       const current=(await f.service.get(owner,id)).comic;expect(current.plot).toBe('A different story');expect(current.questions).toEqual(first.questions);expect(calls).toBe(2);
     }finally{f.local.close();}
   });
+  for (const useDurable of [false,true]) for (const pageCount of [1,5,10]) {
+    test(`${useDurable ? 'durable' : 'local'} planning preserves a chosen ${pageCount}-page comic`,async()=>{
+      const f=fixture({
+        async storyboard(input:{pageCount:number;panelsPerPage:number}) {
+          expect(input.pageCount).toBe(pageCount);
+          return {...storyboard,pages:Array.from({length:input.pageCount},(_,i)=>({index:i+1,panels:Array.from({length:input.panelsPerPage},(_,j)=>spec(`p${i+1}-${j+1}`,j+1))}))};
+        },
+        async narrativeJudge(){return {outcome:'pass',findings:[]};},
+      },useDurable);
+      try {
+        const created=await f.service.create(owner,{...creation,pageCount});
+        expect((await f.service.get(owner,created.comic.id)).comic.pageCount).toBe(pageCount);
+        const id=created.comic.id;
+        await f.service.update(owner,id,{pageCount,panelsPerPage:2});
+        await f.service.addCharacter(owner,id,{name:'Mina',role:'courier',appearance:'hair',outfit:'coat'});
+        const record=f.local.getOwned<any>(id,owner)!,reference=randomUUID();
+        f.files.set(reference,png);
+        f.local.update(id,owner,record.revision,{...record.data,characters:[{...record.data.characters[0],approved:true,referenceAssetId:reference}]});
+        const result=await f.service.planStory(owner,id);
+        expect(result.comic.pages).toHaveLength(pageCount);
+        expect(result.comic.storyboard?.pages).toHaveLength(pageCount);
+        expect(result.comic.pageCount).toBe(pageCount);
+        expect(result.comic.pages.every(page=>page.panels.length===2)).toBe(true);
+        await expect(f.service.update(owner,id,{pageCount:pageCount===10 ? 9 : pageCount+1})).rejects.toMatchObject({code:'conflict'});
+        expect((await f.service.get(owner,id)).comic.pages).toHaveLength(pageCount);
+      } finally {f.local.close();}
+    });
+  }
+  test('page counts default to three and invalid values are rejected before generation',async()=>{
+    const f=fixture();try {
+      const created=await f.service.create(owner,creation);
+      expect((await f.service.get(owner,created.comic.id)).comic.pageCount).toBe(3);
+      for(const pageCount of [0,11,1.5,'5']) {
+        await expect(f.service.create(owner,{...creation,pageCount})).rejects.toMatchObject({code:'invalid_input'});
+        await expect(f.service.update(owner,created.comic.id,{pageCount})).rejects.toMatchObject({code:'invalid_input'});
+      }
+      expect((await f.service.get(owner,created.comic.id)).comic.pageCount).toBe(3);
+      expect(f.calls).toEqual([]);
+    }finally{f.local.close();}
+  });
   test('story planning replays its saved storyboard and judge without extra calls',async()=>{
     const f=fixture({async storyboard(){f.calls.push('storyboard');return storyboard;},async narrativeJudge(){f.calls.push('narrative');return {outcome:'pass',findings:[]};}});try {
       const id=(await f.service.create(owner,creation)).comic.id,card=(await f.service.addCharacter(owner,id,{name:'Mina',role:'courier',appearance:'hair',outfit:'coat'})).comic.characters[0],record=f.local.getOwned<any>(id,owner)!,reference=randomUUID();
