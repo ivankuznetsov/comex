@@ -2,7 +2,7 @@
 
 Turn a story idea into a comic, with original characters, editable pages, and a public reading shelf. Comex is being built for the DevDay Exchange London Community Hackathon on 1 November 2026.
 
-The current build runs locally. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
+The local build runs in a browser. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
 
 [Watch the 43-second demo](docs/demo/comex-demo-simulated.mp4). It uses simulated AI and email providers with example artwork; it does not demonstrate live email delivery.
 
@@ -15,7 +15,9 @@ bun install --frozen-lockfile
 bun run dev --hostname 127.0.0.1
 ```
 
-Open the local address printed by Next.js. Drafts and images are stored in the ignored `data/` directory. New creators can start a draft with an email address; email-code sign-in saves those drafts to an account. Real code delivery requires the sender and secrets described in [local setup](docs/setup.md).
+Open the local address printed by Next.js. Drafts and images are stored in the ignored `data/` directory. A creator can start without an email; the browser session lasts 30 days. When email delivery is configured, creators can choose to claim those drafts by signing in from the same browser. Real code delivery requires the sender and secrets described in [local setup](docs/setup.md).
+
+Each running server serves the checkout and configuration it was started from. A development server on port 3000 is not automatically the same build or database as another instance. Check its working directory and branch before testing. Provider-call limits are persistent across server restarts; an exhausted shared budget remains exhausted. Use separate `COMEX_DB_PATH`, `COMEX_ASSET_PATH`, and `COMEX_BUDGET_DB_PATH` values for an isolated test, and set an intentional call limit as described in the setup guide.
 
 Real story and image generation needs an OpenAI API key and access to the configured models. Keep the key in 1Password and inject it into the local process; never commit it. See [local setup](docs/setup.md) and `.env.example`. A local three-page test has been generated; see the [live test findings](docs/research/live-test-2026-11-01.md). Actual monetary cost has not been measured.
 
@@ -29,9 +31,11 @@ bun run build
 
 ## Scope and status
 
-The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; selecting and adding a card starts its reference image. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background and their findings are advisory. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
+The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; drawing a reference is a separate action. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background and their findings are advisory. Creators can draw the next page or publish once the artwork is complete, without approving individual panels. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
 
-SQLite and local asset storage are for local development only. Deployment, hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization remain unverified. No production deployment has been made.
+The hosted implementation adds shared drafts and a remote MCP connection for Codex, ChatGPT, and Dot. It follows the editor's questions and review choices, including explicit approval of the displayed story and images. See [assistant connections](docs/mcp.md) and [hosted setup](docs/setup.md#hosted-mcp). SQLite and local asset storage remain for local development only. Deployment, hosted storage and durable jobs have not been verified in a deployed environment; the real client connections also require separate acceptance tests.
+
+The separate Vercel demo can route its API through a running local gateway, so its database, images and jobs remain on that machine. See [setup](docs/setup.md) for that temporary arrangement.
 
 ## Credits
 

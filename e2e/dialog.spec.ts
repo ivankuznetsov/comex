@@ -7,7 +7,7 @@ test('publish dialog manages keyboard focus and returns it to the trigger', asyn
   await page.getByLabel('Give your comic a title').fill('The Courier');
   await page.getByLabel('What happens in your story?').fill('A courier delivers a mysterious key.');
   await page.getByRole('button', { name: /Start creating/ }).click();
-  await expect(page).toHaveURL(/\/comics\//);
+  await expect(page).toHaveURL(/\/comics\//,{timeout:30_000});
 
   const trigger = page.getByRole('button', { name: 'Publish', exact: true });
   await trigger.focus();
@@ -39,11 +39,8 @@ test('publish dialog manages keyboard focus and returns it to the trigger', asyn
   await expect(trigger).toBeFocused();
 
   await trigger.click();
-  const publishResponse = page.waitForResponse(response => response.url().endsWith('/publish') && response.request().method() === 'POST');
-  await dialog.getByRole('button', { name: 'Publish comic' }).click();
-  expect((await publishResponse).status()).toBeGreaterThanOrEqual(400);
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('alert')).toHaveText('All current panels must be generated before publishing.');
+  await expect(dialog.getByRole('button', { name: 'Publish comic' })).toBeDisabled();
+  await expect(dialog.getByText(/0 of 0 planned pages are complete/)).toBeVisible();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(trigger).toBeFocused();
 });

@@ -11,6 +11,8 @@ execution: code
 
 > Planning artifact only. Later user decisions supersede any requirement for mandatory panel-review acceptance.
 
+> **Creator clarification during implementation:** MCP should offer the same questions and review choices as the current editor, superseding conflicting requirements below.
+
 ## Goal Capsule
 
 - **Objective:** Creators can make, review, revise, and share Comex comics from Codex, ChatGPT, and OpenAI Dot, continuing the same drafts in the Comex editor.

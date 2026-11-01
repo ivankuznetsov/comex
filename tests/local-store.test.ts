@@ -13,6 +13,16 @@ describe('local draft storage', () => {
     expect(store.getOwned('comic-1', 'owner-a')?.data).toEqual({ title: 'Second' });
     store.close();
   });
+  test('reference attachment cannot race an active page job', () => {
+    const store=new LocalStore(':memory:');
+    store.create('comic','owner',{title:'Draft'});
+    expect(store.beginPageJob('comic','owner','page','job',1)?.created).toBe(true);
+    expect(store.updateWithoutActivePageJob('comic','owner',1,{title:'Uploaded'})).toBe(false);
+    expect(store.getOwned('comic','owner')?.data).toEqual({title:'Draft'});
+    store.finishPageJob('job','owner','completed',null);
+    expect(store.updateWithoutActivePageJob('comic','owner',1,{title:'Uploaded'})).toBe(true);
+    store.close();
+  });
   test('public reader sees only an explicit published snapshot', () => {
     const store = new LocalStore(':memory:');
     store.create('comic-1', 'owner-a', { title: 'Private' });

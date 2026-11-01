@@ -43,7 +43,9 @@ export class LocalStore {
       CREATE TABLE IF NOT EXISTS auth_guests (token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL UNIQUE, email TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, salt TEXT NOT NULL, browser_hash TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS auth_code_attempts (email_hash TEXT NOT NULL, attempted_at INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS auth_requests_time ON auth_requests(requested_at);`);
+      CREATE INDEX IF NOT EXISTS auth_requests_time ON auth_requests(requested_at);
+      CREATE TABLE IF NOT EXISTS mcp_grants (id TEXT PRIMARY KEY, owner TEXT NOT NULL, client_id TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, client_name TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
+      CREATE INDEX IF NOT EXISTS mcp_grants_owner ON mcp_grants(owner);`);
     // Existing guest tables predate server-side expiry. Preserve their sessions
     // for one cookie lifetime from migration, without extending them on restart.
     this.db.exec('BEGIN IMMEDIATE');
@@ -75,6 +77,41 @@ export class LocalStore {
     return !!this.db.prepare(`SELECT 1 FROM comics c WHERE c.owner=?
       AND NOT EXISTS(SELECT 1 FROM auth_users u WHERE u.owner=c.owner)
       AND NOT EXISTS(SELECT 1 FROM auth_guests g WHERE g.owner=c.owner) LIMIT 1`).get(owner);
+  }
+  /** Called inside the same write transaction as the draft and grant transfer. */
+  private transferOperations(source:string,destination:string):void {
+    if(source===destination)return;
+    const tables=this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('operations','operation_dispatch_intents','operation_steps','operation_checkpoints')").all() as {name:string}[];
+    if(tables.length===0)return; // Databases created before U5 have no operation history.
+    if(tables.length!==4)throw new Error('Operation history is incomplete; the claim cannot continue.');
+    const active=this.db.prepare(`SELECT 1 FROM operations o WHERE o.owner=? AND (o.status IN ('queued','running','unknown_outcome') OR
+      EXISTS(SELECT 1 FROM operation_steps s LEFT JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND (s.state IN ('running','unknown') OR r.id IS NULL OR r.state IN ('running','unknown')))) LIMIT 1`).get(source);
+    if(active)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
+    const invalidGrant=this.db.prepare(`SELECT 1 FROM operations o LEFT JOIN mcp_grants g ON g.id=o.grant_id WHERE o.owner=? AND o.grant_id IS NOT NULL AND (g.id IS NULL OR g.owner<>o.owner) LIMIT 1`).get(source);
+    if(invalidGrant)throw new ClaimInProgressError('A saved operation references another connection; the drafts were not moved.');
+    const collision=this.db.prepare(`SELECT 1 FROM operations s JOIN operations d ON d.owner=? AND d.action=s.action AND d.request_key=s.request_key WHERE s.owner=? LIMIT 1`).get(destination,source);
+    if(collision)throw new ClaimInProgressError('A saved operation uses the same request key in both workspaces; the drafts were not moved.');
+    this.db.prepare('UPDATE operations SET owner=? WHERE owner=?').run(destination,source);
+  }
+  /** Convert a proven legacy cookie capability into a separate stable owner. */
+  claimLegacyOwner(token:string,email:string,now=Date.now()): {owner:string;email:string} | null {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing=this.guestIdentity(token,now);if(existing){this.db.exec('COMMIT');return existing;}
+      if(this.hasGuestToken(token) || !this.hasLegacyOwner(token)){this.db.exec('COMMIT');return null;}
+      const active=this.db.prepare(`SELECT 1 FROM comics c WHERE c.owner=? AND (
+        EXISTS(SELECT 1 FROM comic_text_operations t WHERE t.comic_id=c.id AND t.state='running') OR
+        EXISTS(SELECT 1 FROM json_each(c.draft,'$.operations') o WHERE o.value='running') OR
+        EXISTS(SELECT 1 FROM json_each(c.draft,'$.pages') p, json_each(p.value,'$.panels') n WHERE json_extract(n.value,'$.status')='checking')) LIMIT 1`).get(token);
+      if(active)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
+      const owner=randomBytes(32).toString('hex');
+      this.transferOperations(token,owner);
+      this.db.prepare('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES (?,?,?,?)').run(hash(token),owner,email,now+GUEST_TTL_MS);
+      this.db.prepare(`UPDATE comics SET owner=?,draft=json_set(draft,'$.ownerId',?), edition=CASE WHEN edition IS NOT NULL AND json_extract(edition,'$.sourceRevision')=revision THEN json_set(edition,'$.sourceRevision',revision+1) ELSE edition END,revision=revision+1 WHERE owner=?`).run(owner,owner,token);
+      this.db.prepare('UPDATE comic_text_operations SET owner=? WHERE owner=?').run(owner,token);
+      this.db.prepare('UPDATE mcp_grants SET owner=? WHERE owner=?').run(owner,token);
+      this.db.exec('COMMIT');return {owner,email};
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
   updateGuestEmail(token:string,email:string,now=Date.now()): boolean {
     return Number(this.db.prepare('UPDATE auth_guests SET email=? WHERE token_hash=? AND expires_at>?').run(email,hash(token),now).changes)===1;
@@ -132,8 +169,10 @@ export class LocalStore {
           EXISTS(SELECT 1 FROM json_each(c.draft,'$.operations') o WHERE o.value='running')
         ) LIMIT 1`).get(anonymousOwner);
         if (active) throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try signing in again.');
+        this.transferOperations(anonymousOwner,owner);
         this.db.prepare(`UPDATE comics SET owner=?,draft=json_set(draft,'$.ownerId',?), edition=CASE WHEN edition IS NOT NULL AND json_extract(edition,'$.sourceRevision')=revision THEN json_set(edition,'$.sourceRevision',revision+1) ELSE edition END,revision=revision+1 WHERE owner=?`).run(owner,owner,anonymousOwner);
         this.db.prepare('UPDATE comic_text_operations SET owner=? WHERE owner=?').run(owner,anonymousOwner);
+        this.db.prepare('UPDATE mcp_grants SET owner=? WHERE owner=?').run(owner,anonymousOwner);
         this.db.prepare('UPDATE page_jobs SET owner=? WHERE owner=?').run(owner,anonymousOwner);
         this.db.prepare('DELETE FROM auth_guests WHERE owner=?').run(anonymousOwner);
       }
@@ -166,6 +205,10 @@ export class LocalStore {
   }
   update(id: string, owner: string, revision: number, data: unknown): boolean {
     return Number(this.db.prepare('UPDATE comics SET draft=?,revision=revision+1 WHERE id=? AND owner=? AND revision=?').run(JSON.stringify(data), id, owner, revision).changes) === 1;
+  }
+  updateWithoutActivePageJob(id:string,owner:string,revision:number,data:unknown):boolean {
+    return Number(this.db.prepare(`UPDATE comics SET draft=?,revision=revision+1 WHERE id=? AND owner=? AND revision=?
+      AND NOT EXISTS(SELECT 1 FROM page_jobs WHERE comic_id=comics.id AND state IN ('running','unknown'))`).run(JSON.stringify(data),id,owner,revision).changes)===1;
   }
   /** Reviews are version-keyed metadata and never alter the creator's draft revision. */
   putAdvisoryReview(id:string, owner:string, key:string, result:unknown): boolean {
@@ -234,10 +277,10 @@ export class LocalStore {
       throw error;
     }
   }
-  withdraw(id: string, owner: string): boolean {
+  withdraw(id: string, owner: string, revision?: number): boolean {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const changed = Number(this.db.prepare('UPDATE comics SET edition=NULL,published_at=NULL,revision=revision+1 WHERE id=? AND owner=?').run(id, owner).changes) === 1;
+      const changed = Number(this.db.prepare('UPDATE comics SET edition=NULL,published_at=NULL,revision=revision+1 WHERE id=? AND owner=? AND (? IS NULL OR revision=?)').run(id, owner, revision ?? null, revision ?? null).changes) === 1;
       if (changed) this.db.prepare('DELETE FROM publication_assets WHERE comic_id=?').run(id);
       this.db.exec('COMMIT');
       return changed;

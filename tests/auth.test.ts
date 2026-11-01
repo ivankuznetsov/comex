@@ -16,6 +16,16 @@ function configure(){process.env.COMEX_APP_URL='http://localhost:3000';process.e
 const codeOf=(text:string)=>text.match(/code is (\d{8})/)![1];
 
 describe('email code authentication',()=>{
+ test('a new browser can create and later claim drafts without entering an email first',async()=>{
+  const store=new LocalStore(':memory:');state.__comexLocalStore=store;configure();let text='';
+  globalThis.fetch=(async(_u,init)=>{text=JSON.parse(String(init?.body)).text;return new Response('{}',{status:200});}) as typeof fetch;
+  const made=await run('comics',{title:'Draft',plot:'A story',style:'ink-manga'});expect(made.status).toBe(201);
+  const id=(await made.json()).comic.id,guest=cookie(made,'comex_session');
+  expect((await run(`comics/${id}`,undefined,guest)).status).toBe(200);
+  const issued=await run('auth/request',{email:'creator@example.test',claimGuest:true},guest);expect(issued.status).toBe(200);
+  const verified=await run('auth/verify',{email:'creator@example.test',code:codeOf(text)},`${guest}; ${cookie(issued,'comex_login')}`);
+  expect(verified.status).toBe(200);expect((await run(`comics/${id}`,undefined,cookie(verified,'comex_auth'))).status).toBe(200);store.close();
+ });
  test('verified creator can claim legacy drafts, but cannot claim an internal account owner ID as a legacy cookie',async()=>{
   const store=new LocalStore(':memory:');state.__comexLocalStore=store;configure();let text='';
   globalThis.fetch=(async(_u,init)=>{text=JSON.parse(String(init?.body)).text;return new Response('{}',{status:200});}) as typeof fetch;
@@ -43,7 +53,6 @@ describe('email code authentication',()=>{
  test('start a browser draft, verify email and claim it; codes cannot replay',async()=>{
   const store=new LocalStore(':memory:');state.__comexLocalStore=store;configure();let message:{to:string[];text:string}|undefined;
   globalThis.fetch=(async(_url,init)=>{message=JSON.parse(String(init?.body));return new Response('{}',{status:200});}) as typeof fetch;
-  expect((await run('comics',{title:'Draft',plot:'A story',style:'ink-manga'})).status).toBe(401);
   const made=await run('comics',{title:'Draft',plot:'A story',style:'ink-manga',email:'Creator@Example.test'});expect(made.status).toBe(201);
   const id=(await made.json()).comic.id,guest=cookie(made,'comex_session');
   expect((await run(`comics/${id}`,undefined,guest)).status).toBe(200);
