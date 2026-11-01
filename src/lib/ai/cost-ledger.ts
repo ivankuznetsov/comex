@@ -81,7 +81,7 @@ export function attachCostReceipt(response:Response,db:Db,context:CostContext,me
     const envelope=obj(body),model=identifier(envelope.model)??meta.model;
     // Response snapshots of the requested model use that model's rate card.
     const pricingModel=model?.startsWith('gpt-6.1-terra-') && /^gpt-6\.1-terra-\d{4}-\d{2}-\d{2}$/.test(model)?'gpt-6.1-terra':model;
-    const priced=priceUsage(meta.endpoint,pricingModel,obj(envelope.usage),identifier(envelope.service_tier)??'default');
+    const priced=priceUsage(meta.endpoint,pricingModel,obj(envelope.usage),envelope.service_tier===undefined?'default':identifier(envelope.service_tier)??'unknown');
     await query(db,`UPDATE provider_costs SET model=$1,request_id=$2,usage_json=$3,cost_usd=$4,pricing_version=$5,rates_json=$6,cost_state=$7,updated_at=$8 WHERE reservation_id=$9 AND cost_state='unconfirmed'`,[model,identifier(response.headers.get('x-request-id'))??identifier(envelope.id),JSON.stringify(priced.usage),priced.costUsd,'openai-2026-11-01',priced.rates?JSON.stringify(priced.rates):null,priced.state,new Date().toISOString(),context.reservationId]);
     recorded=true;
   }});

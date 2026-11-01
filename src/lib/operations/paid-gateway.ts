@@ -64,9 +64,9 @@ export class PostgresPaidGateway {
           const active=await client.query("SELECT 1 FROM operations WHERE id=$1 AND owner=$2 AND target_id=$3 AND grant_id IS NOT DISTINCT FROM $4 AND status='running' AND lease_token=$5 AND fence=$6 FOR UPDATE",[lease.operationId,owner,targetId,grantId,lease.token,lease.fence]);
           if(!active.rowCount)throw new OperationError('lease_lost','The operation worker lease was lost.');
           await grantCheck(client);
+          await beginCost(client,{reservationId:claimed!,comicId:targetId,operationId:lease.operationId,stepId:step.id},input,init);
           const unexpired=await client.query('SELECT 1 FROM operations WHERE id=$1 AND lease_until>floor(extract(epoch FROM clock_timestamp())*1000)',[lease.operationId]);
           if(!unexpired.rowCount)throw new OperationError('lease_lost','The operation worker lease was lost.');
-          await beginCost(client,{reservationId:claimed!,comicId:targetId,operationId:lease.operationId,stepId:step.id},input,init);
           dispatched=true;
           try {response=Promise.resolve(this.fetcher(input,init)).then(value=>({ok:true as const,value}),error=>({ok:false as const,error}));}
           catch(error) {response=Promise.resolve({ok:false as const,error});}
