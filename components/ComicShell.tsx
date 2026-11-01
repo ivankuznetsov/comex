@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import AuthMenu from './AuthMenu';
 
 export const button = 'inline-flex min-h-11 items-center justify-center border-2 border-[#171717] bg-[#ffd83d] px-5 py-2 text-sm font-black text-[#171717] shadow-[4px_4px_0_#171717] transition-transform hover:translate-x-px hover:translate-y-px active:shadow-none focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#1849a9] disabled:cursor-not-allowed disabled:opacity-50';
 export const secondaryButton = `${button} bg-[#fffef8]`;
@@ -13,6 +14,7 @@ export function ComicShell({ children }: { children: ReactNode }) {
         <nav aria-label="Main navigation" className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-bold sm:text-base">
           <Link href="/" className="underline-offset-4 hover:underline">Browse comics</Link>
           <Link href="/drafts" className="underline-offset-4 hover:underline">My drafts</Link>
+          <AuthMenu />
           <Link href="/create" className={secondaryButton}>Create a comic <span aria-hidden="true" className="ml-2">↗</span></Link>
         </nav>
       </div>

@@ -8,6 +8,13 @@ const state = {location:'London',time:'day',props:[],outfits:[],injuries:[],know
 
 globalThis.fetch = async (input, init) => {
   const url = typeof input === 'string' ? input : input.url || String(input);
+  if (url === 'https://api.resend.com/emails') {
+    if (process.env.RESEND_API_KEY !== 'e2e-fake-resend-key' || !process.env.COMEX_E2E_MAILBOX) throw new Error('The fake mailer requires E2E settings.');
+    const body = JSON.parse(init.body);
+    if (body.to.length !== 1 || !/^[a-z0-9+]+@example\.test$/.test(body.to[0])) throw new Error('Unexpected fake email recipient.');
+    require('node:fs').writeFileSync(require('node:path').join(process.env.COMEX_E2E_MAILBOX, `${body.to[0]}.json`), JSON.stringify(body), {mode:0o600});
+    return Response.json({id:'fake-email'});
+  }
   if (!url.startsWith('https://api.openai.com/v1/')) return originalFetch(input, init);
   if (url.includes('/images/')) return Response.json({data:[{b64_json:png}]});
   const body = JSON.parse(init.body);

@@ -7,7 +7,7 @@ import stylePresets from '../../prompts/styles.json';
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import sharp from 'sharp';
-import { LocalStore } from './local-store';
+import { LocalStore, ClaimInProgressError } from './local-store';
 import { createBudgetedFetch, BudgetError } from './budget';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseStory, publishComic, isPanelReady, type ComicDraft } from './domain/comic';
 
@@ -26,8 +26,12 @@ const publishSchema = z.object({title: short, creator: z.string().trim().max(100
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 function reply(data: unknown, status = 200) { return NextResponse.json(data, {status, headers: {'Cache-Control': 'no-store'}}); }
 function owner(request: NextRequest): string | null {
-  const value = request.cookies.get('comex_session')?.value;
-  return value && /^[a-f0-9]{64}$/.test(value) ? value : null;
+  const authenticated = request.cookies.get('comex_auth')?.value;
+  if (authenticated && /^[a-f0-9]{64}$/.test(authenticated)) {
+    const identity = getStore().authIdentity(authenticated);
+    if (identity) return identity.owner;
+  }
+  return null;
 }
 function assertMutation(request: NextRequest) {
   const origin = request.headers.get('origin');
@@ -64,7 +68,8 @@ function view(draft: Draft, published: Edition | null, revision: number) {
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
       status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => p.storyRevision === draft.storyRevision && isPanelReady(p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
       panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, findings: draft.panelFindings?.[p.id] ?? [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null}))})),
-    published: !!published, unpublishedChanges: !!published && published.sourceRevision !== revision,
+    published: !!published, publication: published ? {title:published.title, creator:published.creator} : null,
+    unpublishedChanges: !!published && published.sourceRevision !== revision,
   };
 }
 function save(store: LocalStore, session: string, revision: number, draft: Draft) {
@@ -146,7 +151,8 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
   if (panel.status === 'checking') throw new HttpError(409, 'Wait for the panel review to finish.');
   if (expectedAssetId && panel.assetId !== expectedAssetId) throw new HttpError(409, 'Panel changed while planning the edit; try again.');
   const previous = index > 0 ? panels[index - 1] : undefined;
-  if (previous && !previous.assetId) throw new HttpError(409, 'Generate earlier panels first.');
+  if (previous && (!previous.assetId || previous.storyRevision !== draft.storyRevision || ['outdated','planned','checking'].includes(previous.status))) throw new HttpError(409, 'Generate and review earlier panels first.');
+  if (previous?.evaluation === 'blocker' && !isPanelReady(previous)) throw new HttpError(409, 'Review the preceding panel before generating this one.');
   const spec = storyboard.pages.flatMap(p => p.panels).find(p => p.id === panelId);
   if (!spec) throw new HttpError(409, 'The storyboard does not match this panel.');
   const characters = draft.characters.filter(c => spec.character_ids.includes(c.id));
@@ -233,6 +239,7 @@ async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]
   return result;
 }
 function aiUnavailable() { throw new HttpError(503, 'AI generation is not configured yet. Add an OpenAI API key to the local environment and complete the AI integration.'); }
+// Host validation mitigates DNS rebinding; the loopback server binding is the network boundary.
 function ensureLocal(request: NextRequest) {
   const rawHost = request.headers.get('host') ?? request.nextUrl.host;
   let parsedHost: URL;
@@ -245,6 +252,73 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     ensureLocal(request);
     const store = getStore();
     const method = request.method;
+    if (segments[0] === 'auth') {
+      if (segments.length === 2 && segments[1] === 'session' && method === 'GET') {
+        const token = request.cookies.get('comex_auth')?.value;
+        const identity = token && /^[a-f0-9]{64}$/.test(token) ? store.authIdentity(token) : null;
+        return reply({user: identity ? {email: identity.email} : null});
+      }
+      // Require Origin for these endpoints; never derive an email link from the Host header.
+      const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
+      if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+      if (segments.length === 2 && segments[1] === 'request' && method === 'POST') {
+        const {email: rawEmail} = await input(request, z.object({email:z.string().trim().email().max(254)}).strict());
+        const at = rawEmail.lastIndexOf('@');
+        const email = `${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}`;
+        const configuredUrl = process.env.COMEX_APP_URL;
+        const apiKey = process.env.RESEND_API_KEY, from = process.env.COMEX_EMAIL_FROM;
+        if (!configuredUrl || !apiKey || !from) throw new HttpError(503, 'Email sign-in is not configured yet.');
+        let base: URL;
+        try { base = new URL(configuredUrl); } catch { throw new HttpError(503, 'Email sign-in is not configured yet.'); }
+        if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(base.hostname))) || base.username || base.password || base.pathname !== '/' || base.search || base.hash || base.origin !== requestOrigin) throw new HttpError(503, 'Email sign-in is not configured for this address.');
+        const existingBrowser = request.cookies.get('comex_login')?.value;
+        const browser = existingBrowser && /^[a-f0-9]{64}$/.test(existingBrowser) ? existingBrowser : randomBytes(32).toString('hex');
+        const token = randomBytes(32).toString('hex');
+        const issued = store.issueLink(email, token, browser);
+        if (!issued) throw new HttpError(429, 'Too many sign-in requests. Please try again later.');
+        if (issued) {
+          const link = `${base.origin}/sign-in/verify#${token}`;
+          let delivered = false;
+          try {
+            const response = await fetch('https://api.resend.com/emails', {method:'POST', headers:{Authorization:`Bearer ${apiKey}`, 'Content-Type':'application/json'}, body:JSON.stringify({from,to:[email],subject:'Your Comex sign-in link',text:`Open this link to sign in. It expires in 15 minutes.\n\n${link}\n\nIf you did not request it, you can ignore this email.`})});
+            delivered = response.ok;
+          } catch { /* Preserve a generic provider error without logging credentials or links. */ }
+          if (!delivered) { store.invalidateLink(token); throw new HttpError(502, 'Could not send the sign-in email. Please try again.'); }
+        }
+        const response = reply({message:'If the address can receive email, a sign-in link is on its way.'});
+        if (issued) response.cookies.set('comex_login', browser, {httpOnly:true, sameSite:'lax', secure:base.protocol === 'https:', path:'/', maxAge:15*60});
+        return response;
+      }
+      if (segments.length === 2 && segments[1] === 'inspect' && method === 'POST') {
+        const {token} = await input(request, z.object({token:z.string().regex(/^[a-f0-9]{64}$/)}).strict());
+        const link = store.inspectLink(token);
+        if (!link) throw new HttpError(400, 'This link has expired or was already used. Request a new one.');
+        return reply({email:link.email});
+      }
+      if (segments.length === 2 && segments[1] === 'verify' && method === 'POST') {
+        const {token} = await input(request, z.object({token:z.string().regex(/^[a-f0-9]{64}$/)}).strict());
+        const browser = request.cookies.get('comex_login')?.value;
+        const anonymous = request.cookies.get('comex_session')?.value;
+        const result = store.consumeLink(token,browser && /^[a-f0-9]{64}$/.test(browser) ? browser : null,anonymous && /^[a-f0-9]{64}$/.test(anonymous) ? anonymous : null);
+        if (!result) throw new HttpError(400, 'This link has expired or was already used. Request a new one.');
+        const response = reply({user:{email:result.email}});
+        response.cookies.set('comex_auth',result.session,{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:30*24*60*60});
+        if (result.sameBrowser) {
+          response.cookies.set('comex_login','',{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:0});
+          response.cookies.set('comex_session','',{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:0});
+        }
+        return response;
+      }
+      if (segments.length === 2 && segments[1] === 'sign-out' && method === 'POST') {
+        await input(request,z.object({}).strict());
+        const token = request.cookies.get('comex_auth')?.value;
+        if (token && /^[a-f0-9]{64}$/.test(token)) store.signOut(token);
+        const response = reply({ok:true});
+        response.cookies.set('comex_auth','',{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:0});
+        return response;
+      }
+      throw new HttpError(404, 'Not found.');
+    }
     if (segments[0] === 'published' && method === 'GET') {
       if (segments.length === 4 && segments[2] === 'assets') {
         const edition = store.getPublished<Edition>(segments[1]);
@@ -270,17 +344,17 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     if (segments[0] !== 'comics') throw new HttpError(404, 'Not found.');
     if (segments.length === 1 && method === 'GET') {
       const session = owner(request);
-      return reply({comics: session ? store.listOwned<Draft>(session).map(d => ({id: d.id, title: d.title, plot: d.plot, published: !!store.getPublished<Edition>(d.id)})) : []});
+      if (!session) throw new HttpError(401, 'Sign in to see your drafts.');
+      return reply({comics: store.listOwned<Draft>(session).map(d => ({id: d.id, title: d.title, plot: d.plot, published: !!store.getPublished<Edition>(d.id)}))});
     }
     if (segments.length === 1 && method === 'POST') {
       const body = await input(request, createSchema);
-      const session = owner(request) ?? randomBytes(32).toString('hex');
+      const session = owner(request);
+      if (!session) throw new HttpError(401, 'Sign in before creating a comic.');
       const id = randomUUID();
       const draft: Draft = {...createBlankComic(id, session), title: body.title, plot: body.plot, styleId: body.style, characters: [], answers: {}, questions: []};
       store.create(id, session, draft);
-      const response = reply({comic: {id}}, 201);
-      if (!owner(request)) response.cookies.set('comex_session', session, {httpOnly: true, sameSite: 'strict', secure: request.nextUrl.protocol === 'https:', path: '/', maxAge: 60 * 60 * 24 * 30});
-      return response;
+      return reply({comic: {id}}, 201);
     }
     if (segments.length < 2) throw new HttpError(404, 'Not found.');
     const id = segments[1];
@@ -449,10 +523,14 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         const panel = current.data.pages.flatMap(p => p.panels).find(p => p.id === panelId);
         if (!panel) throw new HttpError(409,'Panel no longer exists.');
         if (panel.revision !== baseline) {
+          if (panel.evaluation === 'blocker' && !isPanelReady(panel)) return reply({comic:view(current.data,store.getPublished<Edition>(id),current.revision),notice:'Page generation paused. Repair or explicitly accept the flagged panel before continuing.'});
           if (panel.storyRevision === operation.storyRevision && panel.assetId && ['current','needs_review'].includes(panel.status)) continue;
           throw new HttpError(409,'Panel changed while drawing the page.');
         }
         await renderPanel(store,session,id,panelId);
+        const reviewed = store.getOwned<Draft>(id,session);
+        const finishedPanel = reviewed?.data.pages.flatMap(p => p.panels).find(p => p.id === panelId);
+        if (reviewed && finishedPanel?.evaluation === 'blocker' && !isPanelReady(finishedPanel)) return reply({comic:view(reviewed.data,store.getPublished<Edition>(id),reviewed.revision),notice:'Page generation paused. Repair or explicitly accept the flagged panel before continuing.'});
       }
       const latest = store.getOwned<Draft>(id,session)!;
       const { [requestedPage.id]: finished, ...pageOperations } = latest.data.pageOperations ?? {}; void finished;
@@ -503,6 +581,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     throw new HttpError(404, 'Not found.');
   } catch (error) {
     if (error instanceof HttpError) return reply({error: error.message}, error.status);
+    if (error instanceof ClaimInProgressError) return reply({error:error.message},409);
     if (error instanceof BudgetError) return reply({error: error.message, code:error.code}, error.code === 'budget_not_configured' ? 503 : 429);
     if (error instanceof AIError) return reply({error: error.message, code: error.code}, error.code === 'missing_key' ? 503 : error.code === 'invalid_input' ? 400 : 502);
     if (error instanceof Error && /incomplete|unaccepted|stale publication/.test(error.message)) return reply({error: error.message}, 409);

@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
+import {signIn} from './sign-in-helper';
 
 test('publish dialog manages keyboard focus and returns it to the trigger', async ({ page }) => {
+  await signIn(page,'dialog@example.test');
   await page.goto('/create');
   await page.getByLabel('Give your comic a title').fill('The Courier');
   await page.getByLabel('What happens in your story?').fill('A courier delivers a mysterious key.');

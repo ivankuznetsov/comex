@@ -11,4 +11,4 @@ export type Question = {id: string; question: string; suggestedAnswer?: string};
 export type ReviewFinding = {severity: string; dimension: string; expected: string; observed: string};
 export type Panel = {id: string; imageUrl?: string | null; description?: string; status?: string; evaluation?: 'pending' | 'pass' | 'warning' | 'uncertain' | 'blocker'; findings?: ReviewFinding[]; accepted?: boolean};
 export type Page = {id: string; index: number; status: string; panels: Panel[]};
-export type DraftComic = {id: string; title: string; plot: string; style: ComicStyle; pages: Page[]; characters?: Character[]; questions?: Question[]; answers?: Record<string,string>; storyReview?: {outcome:string; findings:ReviewFinding[]}; published?: boolean; unpublishedChanges?: boolean};
+export type DraftComic = {id: string; title: string; plot: string; style: ComicStyle; pages: Page[]; characters?: Character[]; questions?: Question[]; answers?: Record<string,string>; storyReview?: {outcome:string; findings:ReviewFinding[]}; published?: boolean; publication?: {title:string; creator:string} | null; unpublishedChanges?: boolean};

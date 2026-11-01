@@ -66,7 +66,7 @@ function findPanel(comic: ComicDraft, panelId: string): { page: Page; panel: Pan
 export function isPanelReady(panel: Panel): boolean {
   if (!panel.assetId || panel.storyRevision < 1) return false;
   if (panel.status === 'current' && panel.evaluation === 'pass') return true;
-  return panel.status === 'needs_review' && (panel.evaluation === 'warning' || panel.evaluation === 'uncertain') &&
+  return panel.status === 'needs_review' && (panel.evaluation === 'warning' || panel.evaluation === 'uncertain' || panel.evaluation === 'blocker') &&
     panel.acceptance?.assetId === panel.assetId && panel.acceptance.storyRevision === panel.storyRevision &&
     panel.acceptance.panelRevision === panel.revision;
 }
@@ -141,7 +141,7 @@ export function acceptPanel(comic: ComicDraft, ownerId: string, panelId: string,
   const { panel } = findPanel(comic, panelId);
   if (storyRevision !== comic.storyRevision || panel.storyRevision !== storyRevision || panel.assetId !== assetId)
     throw new Error('stale acceptance');
-  if (panel.status !== 'needs_review' || !['uncertain', 'warning'].includes(panel.evaluation))
+  if (panel.status !== 'needs_review' || !['uncertain', 'warning', 'blocker'].includes(panel.evaluation))
     throw new Error('panel is not eligible for acceptance');
   return { ...comic, pages: comic.pages.map(page => ({ ...page, panels: page.panels.map(p => p.id !== panelId ? p : {
     ...p, acceptance: { assetId, storyRevision, panelRevision: p.revision },

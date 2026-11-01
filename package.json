@@ -4,9 +4,9 @@
   "private": true,
   "packageManager": "bun@1.4.4",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
-    "start": "next start",
+    "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests app/api/local-api.test.ts",
     "test:e2e": "playwright test"

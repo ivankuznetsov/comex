@@ -1,8 +1,10 @@
 import { test, expect } from '@playwright/test';
+import {signIn} from './sign-in-helper';
 
 test('creator can save a private local draft and another browser cannot read it', async ({ browser }) => {
   const creator = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const page = await creator.newPage();
+  await signIn(page,'local@example.test');
   await page.goto('/create');
   await page.getByLabel('Give your comic a title').fill('The Clockwork Delivery');
   await page.getByLabel('What happens in your story?').fill('Mina delivers a clockwork bird carrying a mysterious key.');

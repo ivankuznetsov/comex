@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
+import {signIn} from './sign-in-helper';
 
 test('creators correct and remove character cards before planning', async ({ page }) => {
+  await signIn(page,'cards@example.test');
   await page.goto('/create');
   await page.getByLabel('Give your comic a title').fill('The Courier');
   await page.getByLabel('What happens in your story?').fill('A courier finds a key.');

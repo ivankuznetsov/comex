@@ -1,10 +1,12 @@
 import { test, expect } from '@playwright/test';
+import {signIn} from './sign-in-helper';
 
 test('creator plans, draws, edits, publishes and revises a three-page comic', async ({ browser }) => {
   test.skip(process.env.COMEX_E2E_FAKE_PROVIDER !== '1', 'Requires the isolated fake-provider server.');
   test.setTimeout(180_000);
   const creator = await browser.newContext();
   const page = await creator.newPage();
+  await signIn(page,'creator@example.test');
   await page.goto('/create');
   await page.getByLabel('Give your comic a title').fill('The Clockwork Journey');
   await page.getByLabel('What happens in your story?').fill('Mina delivers a clockwork bird carrying a key across London.');

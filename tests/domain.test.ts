@@ -57,6 +57,18 @@ describe('comic domain', () => {
     expect(() => publishComic(comic, 'alice', 0, 'edition')).toThrow('stale');
     expect(() => setPageComposition(comic, 'alice', 'page-1', 'wrong', ['a2', 'a1'])).toThrow('composition');
   });
+  test('accepted visual blockers remain tied to the exact reviewed image', () => {
+    let comic = fixture();
+    comic = commitPanelRender(comic, 'alice', 'p2', {storyRevision:1,panelRevision:2}, 'flagged', 'blocker');
+    expect(() => publishComic(comic, 'alice', 1, 'edition')).toThrow();
+    comic = acceptPanel(comic, 'alice', 'p2', 'flagged', 1);
+    const flagged = comic.pages[0].panels[1];
+    expect(flagged.evaluation).toBe('blocker');
+    expect(flagged.acceptance?.assetId).toBe('flagged');
+    const changed = commitPanelRender(comic, 'alice', 'p2', {storyRevision:1,panelRevision:3}, 'replacement', 'blocker');
+    expect(() => acceptPanel(changed, 'alice', 'p2', 'flagged', 1)).toThrow('stale');
+    expect(changed.pages[0].panels[1].acceptance).toBeNull();
+  });
   test('uncertain findings require acceptance of the exact current asset and revision', () => {
     let comic = fixture();
     comic = commitPanelRender(comic, 'alice', 'p2', { storyRevision: 1, panelRevision: 2 }, 'uncertain', 'uncertain');
