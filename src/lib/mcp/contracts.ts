@@ -23,6 +23,7 @@ export interface McpReads {
   listComics(identity:McpIdentity, options:{limit:number; cursor?:string}):Promise<{comics:unknown[]; nextCursor?:string | null}>;
   getComic(identity:McpIdentity, comicId:string):Promise<{comic:unknown}>;
   getAsset(identity:McpIdentity, comicId:string, assetId:string):Promise<{bytes:Uint8Array; mimeType:'image/png'}>;
+  getExport(identity:McpIdentity, operationId:string):Promise<{bytes:Uint8Array; mimeType:'image/png'}>;
   getOperation(identity:McpIdentity, operationId:string):Promise<{id:string;status:OperationStatus;[key:string]:unknown}>;
 }
 export interface ComexMcpDependencies {

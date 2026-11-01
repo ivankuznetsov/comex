@@ -59,6 +59,11 @@ export function registerTools(server:McpServer,deps:ComexMcpDependencies,identit
       try{return await run(args as Record<string,unknown>) as never;}catch(error){return domainFailure(error) as never;}
     });
   };
+  const imageResult=(image:{bytes:Uint8Array;mimeType:'image/png'},metadata:Record<string,unknown>)=>{
+    if (!(image.bytes instanceof Uint8Array) || image.mimeType!=='image/png' || image.bytes.length<8 || ![137,80,78,71,13,10,26,10].every((byte,index)=>image.bytes[index]===byte)) throw new Error('Invalid image');
+    if (image.bytes.length>10*1024*1024) return result('error','The image is too large for a chat preview.',null,{code:'asset_too_large',nextStep:'Open the comic in the editor to inspect this image.'});
+    return result('ok','Private image preview.',safe({...metadata,mimeType:image.mimeType,bytes:image.bytes.length}),null,[{data:Buffer.from(image.bytes).toString('base64'),mimeType:image.mimeType}]);
+  };
   registerRead('comex_list_styles','List the available style choices and descriptions.',z.object({}).strict(),async()=>{
     const catalog=await deps.reads.listStyles();
     return result('ok','Available comic styles.',safe({styles:catalog.styles.slice(0,50)}));
@@ -84,9 +89,10 @@ export function registerTools(server:McpServer,deps:ComexMcpDependencies,identit
   });
   registerRead('comex_get_asset','Preview one private image belonging to this owner’s comic; images over 10 MiB must be reviewed in the editor.',z.object({comicId:id,assetId}).strict(),async args=>{
     const image=await deps.reads.getAsset(identity,String(args.comicId),String(args.assetId));
-    if (!(image.bytes instanceof Uint8Array) || image.mimeType!=='image/png' || image.bytes.length<8 || ![137,80,78,71,13,10,26,10].every((byte,index)=>image.bytes[index]===byte)) throw new Error('Invalid image');
-    if (image.bytes.length>10*1024*1024) return result('error','The image is too large for a chat preview.',null,{code:'asset_too_large',nextStep:'Open the comic in the editor to inspect this image.'});
-    return result('ok','Private image preview.',safe({comicId:args.comicId,assetId:args.assetId,mimeType:image.mimeType,bytes:image.bytes.length}),null,[{data:Buffer.from(image.bytes).toString('base64'),mimeType:image.mimeType}]);
+    return imageResult(image,{comicId:args.comicId,assetId:args.assetId});
+  });
+  registerRead('comex_get_export','Preview the private page produced by an owned export operation; this does not publish it.',z.object({operationId:id}).strict(),async args=>{
+    return imageResult(await deps.reads.getExport(identity,String(args.operationId)),{operationId:args.operationId});
   });
   for (const definition of definitions) server.registerTool(definition.name,{
     description:definition.description,inputSchema:definition.schema,outputSchema:resultSchema,

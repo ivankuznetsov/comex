@@ -9,7 +9,7 @@ type OperationReader = {getOwned(owner:string,id:string):MaybePromise<Operation|
 type ListingRow = {id:string;draft:unknown;published:boolean | number};
 
 /** Read projections are bounded and always filtered by the authenticated owner. */
-export function createMcpReads(database:DatabaseSync | Pool, service:ReturnType<typeof createComicService>, operations:OperationReader):McpReads {
+export function createMcpReads(database:DatabaseSync | Pool, service:ReturnType<typeof createComicService>, operations:OperationReader, readExport:(owner:string,id:string)=>Promise<Buffer|null>):McpReads {
   return {
     async listStyles() {return service.listStyles();},
     async listComics(identity,{limit,cursor}) {
@@ -24,6 +24,11 @@ export function createMcpReads(database:DatabaseSync | Pool, service:ReturnType<
     },
     async getComic(identity,id) {return service.get(identity.actor,id);},
     async getAsset(identity,id,assetId) {return {bytes:await service.getAsset(identity.actor,id,assetId),mimeType:'image/png'};},
+    async getExport(identity,id) {
+      const bytes=await readExport(identity.actor,id);
+      if (!bytes) throw new ApplicationError('not_found','Export not found.');
+      return {bytes,mimeType:'image/png'};
+    },
     async getOperation(identity,id) {
       const operation=await operations.getOwned(identity.actor,id);
       if (!operation) throw new ApplicationError('not_found','Operation not found.');

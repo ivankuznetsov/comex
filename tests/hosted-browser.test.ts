@@ -44,7 +44,7 @@ postgres('hosted browser adapter',()=>{
     expect((await backend.service.get(identity!.owner,comic.id)).comic.title).toBe('A story');
     await pool.query('INSERT INTO import_batches(id,fingerprint) VALUES ($1,$2)',['hidden','fixture']);
     await pool.query('INSERT INTO comics(id,owner,revision,draft,import_batch_id) VALUES ($1,$2,1,$3,$4)', ['hidden',identity!.owner,JSON.stringify({title:'Unclaimed',plot:'private'}),'hidden']);
-    const reads=createMcpReads(pool,backend.service,{getOwned:()=>null});
+    const reads=createMcpReads(pool,backend.service,{getOwned:()=>null},async()=>null);
     expect((await reads.listComics({actor:identity!.owner,scopes:['comex:read']},{limit:10})).comics).toEqual([{id:comic.id,title:'A story',plot:'A parcel crosses town',published:false}]);
     const get=(headers:Record<string,string>)=>new NextRequest(`https://comex.example/api/comics/${comic.id}`,{headers:{host:'comex.example',...headers}});
     expect((await handleApi(get({cookie}),['comics',comic.id],backend)).status).toBe(200);
