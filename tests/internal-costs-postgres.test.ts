@@ -28,4 +28,20 @@ pgTest('Postgres records a priced call once, replays without charge, and exposes
  expect(await gateway.run(request,invoke)).toEqual([]);expect(await gateway.run(request,invoke)).toEqual([]);expect(calls).toBe(1);
  const rows=(await pool.query('SELECT * FROM provider_costs')).rows;expect(rows).toHaveLength(1);expect(rows[0].comic_id).toBe('comic');expect(rows[0].operation_id).toBe(ticket.id);expect(rows[0].cost_state).toBe('priced');expect(Number(rows[0].cost_usd)).toBe(0.0035);
  const summary=(await pool.query('SELECT * FROM comic_cost_totals')).rows[0];expect(summary.tracked_requests).toBe(1);expect(summary.unpriced_requests).toBe(0);expect(Number(summary.recorded_cost_usd)).toBe(0.0035);
+ await repo.finishOperation(lease,'succeeded',null);
+});
+
+pgTest('cost metadata writes cannot move dispatch beyond the final lease expiry check',async()=>{
+ const ticket=await coordinator.enqueue({identity:{actor:'owner',grantId:'g',scopes:['comex:write','comex:generate']},action:'initialQuestions',requestKey:'cost-expiry',comicId:'comic',expectedRevision:1,input:{}});
+ const lease=(await repo.claimOperation(ticket.id,300000))!;let calls=0;
+ const delayed=new Proxy(pool,{get(target,key){
+  if(key==='connect')return async()=>{const client=await target.connect();return new Proxy(client,{get(c,k){
+   if(k==='query')return async(sql:string,params:unknown[])=>{const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO provider_costs'))await c.query('UPDATE operations SET lease_until=0 WHERE id=$1',[ticket.id]);return result;};
+   const value=Reflect.get(c,k,c);return typeof value==='function'?value.bind(c):value;
+  }});};
+  const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+ }}) as Pool;
+ const gateway=new PostgresPaidGateway(delayed,repo,{save:async()=>'',read:async()=>Buffer.alloc(0)},async()=>{calls++;return Response.json({});});
+ await expect(gateway.run({lease,owner:'owner',step:{id:'expired',input:{}},expectedRevision:1},async fetch=>(await fetch('https://api.openai.com/v1/responses',{body:JSON.stringify({model:'gpt-6.1-terra'})})).json())).rejects.toMatchObject({code:'lease_lost'});
+ expect(calls).toBe(0);expect((await pool.query('SELECT 1 FROM provider_costs WHERE operation_id=$1',[ticket.id])).rowCount).toBe(0);
 });
