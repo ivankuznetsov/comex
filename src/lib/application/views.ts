@@ -1,3 +1,4 @@
+import {estimateComicCost} from '../cost-estimate';
 import {createHash} from 'node:crypto';
 import {isPanelReady, type ComicDraft} from '../domain/comic';
 import type {Character, Draft, Edition, PanelReview} from './contracts';
@@ -124,6 +125,7 @@ export function view(draft: Draft, published: Edition | null, revision: number) 
   }
   return {
     id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId, revision, storyRevision:draft.storyRevision,
+    costEstimate:estimateComicCost(draft),
     pageCount:draft.pageCount ?? (draft.pages.length || 3), panelsPerPage:draft.panelsPerPage ?? 3, pageLayout:draft.pageLayout ?? 'stack',
     characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,lockedByStory:characterUsedInStory(draft,character.id),referenceVersion:referenceAssetId ?? null,cardVersion:characterCardVersion({...character,referenceAssetId}),referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:isNarrativeAccepted(draft)} : null,
     storyboard:draft.storyboard ?? null, storyApproval:fingerprint ? {storyRevision:draft.storyRevision,fingerprint,approved} : null,
