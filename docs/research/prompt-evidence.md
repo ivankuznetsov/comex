@@ -1,0 +1,11 @@
+# Prompt evidence
+
+The initial templates and style presets were drafted as **proposed**, version 1. A limited live test is now recorded in [live-test-2026-11-01.md](live-test-2026-11-01.md); API-tested labels indicate execution, not that quality or consistency passed. The run showed a missed visual continuity defect. Research does not eliminate iteration.
+
+Documentation-backed rationale, checked in the prior planning session: the [image prompting guide](https://developers.openai.com/api/docs/guides/image-prompting) recommends concrete composition and explicit reference roles and preservation constraints; the [image generation guide](https://developers.openai.com/api/docs/guides/image-generation) describes image generation/editing and warns about recurring-character drift and generation latency; [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) constrain response shape but do not prove factual or narrative correctness. The prompt wording and style choices here are proposals, not documentation examples or tested outcomes.
+
+For each tool or API trial, record template version, model ID and snapshot, prompt inputs, ordered reference roles and asset hashes, output hashes, exact settings, start/end times, latency, usage/cost if available, failures, and a human assessment. Label a result `tool-tested` only when an actual tool result was inspected, and `api-tested` only for the named API model/account. Keep untrusted/private prompts and generated assets out of the public repository unless deliberately sanitized for the demo. Document refusals and failed/inconclusive trials; do not convert them into passing results.
+
+The narrative fixtures under `evals/fixtures/story/` are manually authored proposed gold cases, not evaluator results. The image corpus and evaluator calibration remain unperformed.
+
+The later instructions to inspect specific prop actions and outcomes in the visual and narrative judges are proposed changes responding to a missed key-action error. They have not yet been evaluated against a labelled live image corpus; they do not establish that the checker can reliably detect that error.

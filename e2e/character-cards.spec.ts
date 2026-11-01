@@ -1,0 +1,37 @@
+import { expect, test } from '@playwright/test';
+import {signIn} from './sign-in-helper';
+
+test('creators correct and remove character cards before planning', async ({ page }) => {
+  await signIn(page,'cards@example.test');
+  await page.goto('/create');
+  await page.getByLabel('Give your comic a title').fill('The Courier');
+  await page.getByLabel('What happens in your story?').fill('A courier finds a key.');
+  await page.getByRole('button', {name: /Start creating/}).click();
+  await expect(page).toHaveURL(/\/comics\//);
+  const name = page.getByLabel(/^name$/i);
+  const role = page.getByLabel(/^role$/i);
+  const appearance = page.getByLabel(/^appearance$/i);
+  const outfit = page.getByLabel(/^outfit$/i);
+  await name.fill('Mina'); await role.fill('Courier'); await appearance.fill('Dark hair'); await outfit.fill('Blue coat');
+  await page.getByRole('button', {name:'Add character', exact:true}).click();
+  await expect(page.getByRole('heading', {name:'Mina'})).toBeVisible();
+  await name.fill('Bird'); await role.fill('Companion'); await appearance.fill('Small'); await outfit.fill('Red ribbon');
+  await page.getByRole('button', {name:'Add character', exact:true}).click();
+  await expect(page.getByRole('heading', {name:'Bird'})).toBeVisible();
+  const mina = page.locator('article').filter({has:page.getByRole('heading',{name:'Mina'})});
+  await mina.getByRole('button',{name:'Edit card'}).click();
+  await expect(name).toHaveValue('Mina');
+  await name.fill('Mira');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(name).toHaveValue('');
+  await mina.getByRole('button',{name:'Edit card'}).click();
+  await name.fill('Mira'); await appearance.fill('Red hair');
+  await page.getByRole('button',{name:'Save character'}).click();
+  await expect(page.getByRole('heading',{name:'Mira'})).toBeVisible();
+  await expect(page.getByText('Red hair',{exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Bird'})).toBeVisible();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('article').filter({has:page.getByRole('heading',{name:'Mira'})}).getByRole('button',{name:'Remove'}).click();
+  await expect(page.getByRole('heading',{name:'Mira'})).toHaveCount(0);
+  await expect(page.getByRole('heading',{name:'Bird'})).toBeVisible();
+});

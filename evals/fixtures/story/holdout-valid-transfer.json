@@ -1,0 +1,159 @@
+{
+  "id": "holdout-valid-transfer",
+  "split": "holdout",
+  "input": {
+    "goal": "Mina and Pip deliver the key to the tower to open the locked gate.",
+    "characters": [
+      {
+        "id": "mina",
+        "identity": "courier with a square satchel and yellow coat"
+      },
+      {
+        "id": "pip",
+        "identity": "small clockwork bird with brass wings"
+      }
+    ],
+    "panels": [
+      {
+        "id": "p1-1",
+        "action": "Mina gives the key to Pip in the workshop.",
+        "state_before": {
+          "location": "workshop",
+          "time": "afternoon",
+          "prop_owners": {
+            "key": "mina",
+            "satchel": "mina"
+          },
+          "outfits": {
+            "mina": "yellow coat",
+            "pip": "brass shell"
+          },
+          "injuries": {},
+          "knowledge": {
+            "mina": [
+              "key opens tower"
+            ],
+            "pip": []
+          }
+        },
+        "state_after": {
+          "location": "workshop",
+          "time": "afternoon",
+          "prop_owners": {
+            "key": "pip",
+            "satchel": "mina"
+          },
+          "outfits": {
+            "mina": "yellow coat",
+            "pip": "brass shell"
+          },
+          "injuries": {},
+          "knowledge": {
+            "mina": [
+              "key opens tower"
+            ],
+            "pip": [
+              "key opens tower"
+            ]
+          }
+        }
+      },
+      {
+        "id": "p1-2",
+        "action": "Mina and Pip travel together to the tower.",
+        "state_before": {
+          "location": "workshop",
+          "time": "afternoon",
+          "prop_owners": {
+            "key": "pip",
+            "satchel": "mina"
+          },
+          "outfits": {
+            "mina": "yellow coat",
+            "pip": "brass shell"
+          },
+          "injuries": {},
+          "knowledge": {
+            "mina": [
+              "key opens tower"
+            ],
+            "pip": [
+              "key opens tower"
+            ]
+          }
+        },
+        "state_after": {
+          "location": "tower",
+          "time": "afternoon",
+          "prop_owners": {
+            "key": "pip",
+            "satchel": "mina"
+          },
+          "outfits": {
+            "mina": "yellow coat",
+            "pip": "brass shell"
+          },
+          "injuries": {},
+          "knowledge": {
+            "mina": [
+              "key opens tower"
+            ],
+            "pip": [
+              "key opens tower"
+            ]
+          }
+        }
+      },
+      {
+        "id": "p1-3",
+        "action": "Pip hands the key back to Mina, who opens the tower gate.",
+        "state_before": {
+          "location": "tower",
+          "time": "afternoon",
+          "prop_owners": {
+            "key": "pip",
+            "satchel": "mina"
+          },
+          "outfits": {
+            "mina": "yellow coat",
+            "pip": "brass shell"
+          },
+          "injuries": {},
+          "knowledge": {
+            "mina": [
+              "key opens tower"
+            ],
+            "pip": [
+              "key opens tower"
+            ]
+          }
+        },
+        "state_after": {
+          "location": "tower",
+          "time": "afternoon",
+          "prop_owners": {
+            "key": "mina",
+            "satchel": "mina"
+          },
+          "outfits": {
+            "mina": "yellow coat",
+            "pip": "brass shell"
+          },
+          "injuries": {},
+          "knowledge": {
+            "mina": [
+              "key opens tower"
+            ],
+            "pip": [
+              "key opens tower"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "outcome": "pass",
+    "blockers": []
+  }
+}

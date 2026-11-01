@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "evidence": "proposed",
+  "styles": [
+    {"id":"clear-line-adventure","name":"Clear-line adventure","rules":"Use clean even dark contours, simplified readable shapes, flat saturated colors, sparse cel shadows, and clear compositions. Keep character proportions and line weight consistent across panels. Do not imitate a named artist."},
+    {"id":"ink-manga","name":"Ink manga","rules":"Use black and white ink, expressive controlled line weight, sparse screentone for tonal areas, crisp silhouettes, and economical high-contrast composition. Translate color-coded identity into shape and value; do not depend on literal color. Do not imitate a named artist."},
+    {"id":"painted-storybook","name":"Painted storybook","rules":"Use soft gouache-like painted texture, restrained warm colors, simple recognizable shapes, gentle shadows, and clear compositions. Retain stable character silhouettes and identity anchors across panels. Do not imitate a named artist."}
+  ]
+}
