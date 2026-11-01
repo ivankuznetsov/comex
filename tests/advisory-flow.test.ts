@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { acceptPanel, createComic, commitPanelRender, isPanelReady, publishComic, setPageComposition } from '../src/lib/domain/comic';
+import { createComic, commitPanelRender, isPanelReady, publishComic, setPageComposition } from '../src/lib/domain/comic';
 
 describe('advisory reviews', () => {
-  test('a flagged image can be used for drawing but must be accepted before publication', () => {
+  test('a completed image can be published without accepting a pending or flagged review', () => {
     for (const evaluation of ['warning', 'uncertain', 'blocker'] as const) {
       let draft = createComic({id:'comic',ownerId:'owner',title:'Story',creatorName:'',plot:'Plot',styleId:'ink-manga',pages:[{id:'page',panels:[{id:'panel',beat:'A story beat'}]}]});
       draft = commitPanelRender(draft,'owner','panel',{storyRevision:1,panelRevision:1},'image',evaluation);
@@ -11,10 +11,8 @@ describe('advisory reviews', () => {
       expect(isPanelReady(panel)).toBe(true);
       expect(isPanelReady({...panel,status:'checking'})).toBe(true);
       draft = setPageComposition(draft,'owner','page','composite',['image']);
-      expect(() => publishComic(draft,'owner',1,'edition')).toThrow('unaccepted');
-      const accepted = acceptPanel(draft,'owner','panel','image',1);
-      expect(publishComic(accepted,'owner',1,'edition').published?.id).toBe('edition');
-      expect(() => publishComic({...draft,pages:draft.pages.map(page => ({...page,panels:page.panels.map(p => ({...p,status:'checking' as const}))}))},'owner',1,'edition')).toThrow('unaccepted');
+      expect(publishComic(draft,'owner',1,'edition').published?.id).toBe('edition');
+      expect(publishComic({...draft,pages:draft.pages.map(page => ({...page,panels:page.panels.map(p => ({...p,status:'checking' as const}))}))},'owner',1,'edition').published?.id).toBe('edition');
       expect(isPanelReady({...panel,assetId:null})).toBe(false);
       expect(isPanelReady({...panel,status:'outdated'})).toBe(false);
       expect(isPanelReady({...panel,status:'planned'})).toBe(false);

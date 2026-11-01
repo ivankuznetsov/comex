@@ -67,14 +67,6 @@ export function isPanelReady(panel: Panel): boolean {
   return !!panel.assetId && panel.storyRevision >= 1 && ['current', 'needs_review', 'checking'].includes(panel.status);
 }
 
-/** Artwork may be drawn ahead, but publication requires the creator to resolve each review. */
-export function isPanelReviewed(panel: Panel): boolean {
-  if (!isPanelReady(panel) || panel.status === 'checking') return false;
-  if (panel.status === 'current' && panel.evaluation === 'pass') return true;
-  return !!panel.acceptance && panel.acceptance.assetId === panel.assetId &&
-    panel.acceptance.storyRevision === panel.storyRevision && panel.acceptance.panelRevision === panel.revision;
-}
-
 export function createComic(input: CreateComic): ComicDraft {
   required(input.id, 'comic id'); required(input.ownerId, 'owner id'); required(input.title, 'title');
   required(input.plot, 'plot'); required(input.styleId, 'style');
@@ -174,7 +166,6 @@ export function publishComic(comic: ComicDraft, ownerId: string, expectedRevisio
     if (!page.composition || page.panels.some((p, i) => p.storyRevision !== comic.storyRevision || !isPanelReady(p) ||
       page.composition!.panelAssetIds[i] !== p.assetId) || page.composition.panelAssetIds.length !== page.panels.length)
       throw new Error('comic has incomplete pages');
-    if (page.panels.some(p => !isPanelReviewed(p))) throw new Error('comic has incomplete or unaccepted pages');
     return { id: page.id, assetId: page.composition.assetId };
   });
   const published: PublishedEdition = { id: editionId, comicId: comic.id, title: comic.title,
