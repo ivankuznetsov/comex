@@ -1,7 +1,7 @@
 import { wrapDialogue } from './lettering';
-import { randomUUID, randomBytes, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, randomInt, createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { createAIService, AIError, type Storyboard, type Reference, type RevisionResult } from './ai/service';
 import stylePresets from '../../prompts/styles.json';
 import { NextRequest, NextResponse } from 'next/server';
@@ -12,14 +12,15 @@ import { createBudgetedFetch, BudgetError } from './budget';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseStory, publishComic, isPanelReady, type ComicDraft } from './domain/comic';
 
 type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string; referenceAssetId?: string; approved: boolean};
-type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; storyboard?: Storyboard; storyReview?: unknown; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; panelFindings?: Record<string, unknown[]>; operations?: Record<string, 'running' | 'unknown_outcome'>};
+type PanelReview = {assetId:string; storyRevision:number; panelRevision:number; outcome:'pass' | 'findings' | 'inconclusive' | 'failed'};
+type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; storyboard?: Storyboard; storyReview?: unknown; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>};
 type Edition = {id: string; title: string; creator: string; editionId: string; sourceRevision: number; pages: {id: string; imageUrl: string; storage?: 'sqlite'}[]};
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
 const ai = () => createAIService({fetch:createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))});
 const styles = z.enum(['clear-line-adventure', 'ink-manga', 'painted-storybook']);
 const short = z.string().trim().min(1).max(300);
-const createSchema = z.object({title: short, plot: z.string().trim().min(1).max(4000), style: styles}).strict();
+const createSchema = z.object({title: short, plot: z.string().trim().min(1).max(4000), style: styles, email:z.string().trim().email().max(254).optional()}).strict();
 const patchSchema = z.object({title: short.optional(), plot: z.string().trim().min(1).max(4000).optional(), style: styles.optional(), answers: z.record(z.string().max(100), z.string().max(1000)).optional()}).strict();
 const characterSchema = z.object({name: short, role: short, appearance: z.string().trim().min(1).max(1000), outfit: z.string().trim().min(1).max(1000)}).strict();
 const panelVersionSchema = z.object({assetId:z.string().uuid(),storyRevision:z.number().int().positive(),panelRevision:z.number().int().positive()}).strict();
@@ -32,7 +33,8 @@ function owner(request: NextRequest): string | null {
     const identity = getStore().authIdentity(authenticated);
     if (identity) return identity.owner;
   }
-  return null;
+  const guest=request.cookies.get('comex_session')?.value;
+  return guest && /^[a-f0-9]{64}$/.test(guest) ? getStore().guestIdentity(guest)?.owner ?? null : null;
 }
 function assertMutation(request: NextRequest) {
   const origin = request.headers.get('origin');
@@ -62,6 +64,11 @@ function owned(request: NextRequest, id: string) {
   if (!record) throw new HttpError(404, 'Comic not found.');
   return {session, store, ...record};
 }
+function reviewOutcome(draft: Draft, panel: ComicDraft['pages'][number]['panels'][number]): PanelReview['outcome'] | null {
+  const review = draft.panelReviews?.[panel.id];
+  return review && review.assetId === panel.assetId && review.storyRevision === panel.storyRevision && panel.storyRevision === draft.storyRevision &&
+    review.panelRevision === panel.revision && (panel.status === 'needs_review' || panel.status === 'current') ? review.outcome : null;
+}
 function view(draft: Draft, published: Edition | null, revision: number) {
   const reviewFingerprint = narrativeFingerprint(draft);
   return {
@@ -69,7 +76,7 @@ function view(draft: Draft, published: Edition | null, revision: number) {
     characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null})), questions: draft.questions, answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
       status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => p.storyRevision === draft.storyRevision && isPanelReady(p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
-      panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, findings: draft.panelFindings?.[p.id] ?? [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null}))})),
+      panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, reviewOutcome:reviewOutcome(draft,p), findings: reviewOutcome(draft,p) ? draft.panelFindings?.[p.id] ?? [] : [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null}))})),
     published: !!published, publication: published ? {title:published.title, creator:published.creator} : null,
     unpublishedChanges: !!published && published.sourceRevision !== revision,
   };
@@ -150,7 +157,14 @@ const assetRoot = () => resolve(process.env.COMEX_ASSET_PATH || resolve(process.
 async function saveAsset(bytes: Buffer): Promise<string> {
   if (!bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) throw new HttpError(502, 'Image provider did not return a PNG.');
   const id = randomUUID(); await mkdir(assetRoot(), {recursive: true});
-  await writeFile(resolve(assetRoot(), `${id}.png`), bytes, {mode: 0o600, flag: 'wx'}); return id;
+  const path = resolve(assetRoot(), `${id}.png`);
+  const file = await open(path, 'wx', 0o600);
+  try { await file.writeFile(bytes); await file.close(); }
+  catch (error) { await file.close().catch(() => {}); await unlink(path).catch(() => {}); throw error; }
+  return id;
+}
+async function discardAsset(id: string): Promise<void> {
+  await unlink(resolve(assetRoot(), `${id}.png`)).catch(() => {});
 }
 async function asset(id: string): Promise<Buffer> {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new HttpError(404, 'Image not found.');
@@ -200,19 +214,33 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
   if (draft.operations?.[op]) throw new HttpError(409, 'This panel request is already running or has an unknown outcome.');
   const reserved: Draft = {...draft,operations:{...draft.operations,[op]:'running'}};
   if (!store.update(comicId,session,record.revision,reserved)) throw new HttpError(409,'Draft changed; refresh and try again.');
-  let assetId: string;
+  let assetId: string | undefined;
+  let assetCommitted = false;
   try {
     const bytes = editInstruction
       ? await ai().editPanel({change:editInstruction,preserve:JSON.stringify({style:styleRules(draft.styleId),panel:visualSpec,characters}),references:[{role:'target panel',id:panelId,bytes:await asset(panel.assetId!),mimeType:'image/png'},...references]})
       : await ai().panel({styleRules:styleRules(draft.styleId),panelSpec:JSON.stringify(visualSpec),sceneBefore:JSON.stringify(spec.state_before),characters,references});
     assetId = await saveAsset(bytes);
-    const latest = store.getOwned<Draft>(comicId,session);
-    if (!latest || latest.revision !== record.revision + 1) throw new HttpError(409,'Draft changed while rendering; the result was not applied.');
-    const updated = commitPanelRender(latest.data,session,panelId,{storyRevision:draft.storyRevision,panelRevision:panel.revision},assetId,'uncertain') as Draft;
-    const { [op]: ignored, ...operations } = updated.operations ?? {}; void ignored;
-    const checkingPages = updated.pages.map(page => ({...page,panels:page.panels.map(p => p.id === panelId ? {...p,status:'checking' as const} : p)}));
-    if (!store.update(comicId,session,latest.revision,{...updated,pages:checkingPages,panelFindings:{...updated.panelFindings,[panelId]:[]},operations})) throw new HttpError(409,'Draft changed while saving the panel.');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const latest = store.getOwned<Draft>(comicId,session);
+      const currentPanels = latest?.data.pages.flatMap(page => page.panels) ?? [];
+      const currentIndex = currentPanels.findIndex(current => current.id === panelId);
+      const current = currentPanels[currentIndex];
+      const currentPrevious = currentIndex > 0 ? currentPanels[currentIndex - 1] : undefined;
+      if (!latest || latest.data.operations?.[op] !== 'running' || latest.data.storyRevision !== draft.storyRevision ||
+          latest.data.styleId !== draft.styleId || JSON.stringify(latest.data.storyboard) !== JSON.stringify(storyboard) ||
+          JSON.stringify(latest.data.characters) !== JSON.stringify(draft.characters) ||
+          JSON.stringify(current) !== JSON.stringify(panel) || JSON.stringify(currentPrevious) !== JSON.stringify(previous) ||
+          hasNarrativeBlocker(latest.data)) throw new HttpError(409,'Panel inputs changed while rendering; the result was not applied.');
+      const updated = commitPanelRender(latest.data,session,panelId,{storyRevision:draft.storyRevision,panelRevision:panel.revision},assetId,'uncertain') as Draft;
+      const { [op]: ignored, ...operations } = updated.operations ?? {}; void ignored;
+      const checkingPages = updated.pages.map(page => ({...page,panels:page.panels.map(p => p.id === panelId ? {...p,status:'checking' as const} : p)}));
+      const { [panelId]: oldReview, ...panelReviews } = updated.panelReviews ?? {}; void oldReview;
+      if (store.update(comicId,session,latest.revision,{...updated,pages:checkingPages,panelFindings:{...updated.panelFindings,[panelId]:[]},panelReviews,operations})) { assetCommitted = true; break; }
+    }
+    if (!assetCommitted) throw new HttpError(409,'Draft changed while saving the panel.');
   } catch (error) {
+    if (assetId && !assetCommitted) await discardAsset(assetId);
     const latest = store.getOwned<Draft>(comicId,session);
     if (latest?.data.operations?.[op] === 'running') {
       const operations = {...latest.data.operations};
@@ -221,12 +249,15 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
     }
     throw error;
   }
+  if (!assetId) throw new Error('Panel image was not saved.');
   // An unsuccessful or uncalibrated review remains uncertain and requires creator acceptance.
   let findings: Awaited<ReturnType<ReturnType<typeof ai>['visualJudge']>>['findings'] = [];
+  let outcome: PanelReview['outcome'] = 'failed';
   try {
     const result = await ai().visualJudge({bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:visualSpec,
       references:[...references,{role:'generated panel',id:panelId,bytes:await asset(assetId),mimeType:'image/png'}]});
     findings = result.findings;
+    outcome = result.outcome;
   } catch { /* Keep the image and surface an uncertain result. */ }
   const latest = store.getOwned<Draft>(comicId,session);
   if (!latest) return;
@@ -235,7 +266,8 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
   const evaluation = findings.some(f => f.severity === 'blocker') ? 'blocker' : findings.some(f => f.severity === 'warning') ? 'warning' : 'uncertain';
   const pages = latest.data.pages.map(page => ({...page,panels:page.panels.map(p => p.id === panelId ? {...p,evaluation,status:'needs_review' as const,acceptance:null} : p)}));
   const panelFindings = {...latest.data.panelFindings,[panelId]:findings};
-  if (!store.update(comicId,session,latest.revision,{...latest.data,pages,panelFindings})) throw new HttpError(409,'Draft changed while saving the review; refresh and try again.');
+  const panelReviews = {...latest.data.panelReviews,[panelId]:{assetId,storyRevision:draft.storyRevision,panelRevision:current.revision,outcome}};
+  if (!store.update(comicId,session,latest.revision,{...latest.data,pages,panelFindings,panelReviews})) throw new HttpError(409,'Draft changed while saving the review; refresh and try again.');
 }
 function xml(value: string): string { if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]/u.test(value)) throw new HttpError(400,'Dialogue includes a character that cannot be rendered.'); return value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;'); }
 async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]> {
@@ -292,56 +324,65 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (segments.length === 2 && segments[1] === 'session' && method === 'GET') {
         const token = request.cookies.get('comex_auth')?.value;
         const identity = token && /^[a-f0-9]{64}$/.test(token) ? store.authIdentity(token) : null;
-        return reply({user: identity ? {email: identity.email} : null});
+        const guestToken=request.cookies.get('comex_session')?.value;
+        const guest=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? store.guestIdentity(guestToken) : null;
+        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null});
       }
       // Require Origin for these endpoints; never derive an email link from the Host header.
       const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
       if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
       if (segments.length === 2 && segments[1] === 'request' && method === 'POST') {
-        const {email: rawEmail} = await input(request, z.object({email:z.string().trim().email().max(254)}).strict());
+        const {email: rawEmail,claimGuest} = await input(request, z.object({email:z.string().trim().email().max(254),claimGuest:z.boolean().optional()}).strict());
         const at = rawEmail.lastIndexOf('@');
         const email = `${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}`;
-        const configuredUrl = process.env.COMEX_APP_URL;
-        const apiKey = process.env.RESEND_API_KEY, from = process.env.COMEX_EMAIL_FROM;
-        if (!configuredUrl || !apiKey || !from) throw new HttpError(503, 'Email sign-in is not configured yet.');
-        let base: URL;
-        try { base = new URL(configuredUrl); } catch { throw new HttpError(503, 'Email sign-in is not configured yet.'); }
-        if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(base.hostname))) || base.username || base.password || base.pathname !== '/' || base.search || base.hash || base.origin !== requestOrigin) throw new HttpError(503, 'Email sign-in is not configured for this address.');
-        const existingBrowser = request.cookies.get('comex_login')?.value;
-        const browser = existingBrowser && /^[a-f0-9]{64}$/.test(existingBrowser) ? existingBrowser : randomBytes(32).toString('hex');
-        const token = randomBytes(32).toString('hex');
-        const issued = store.issueLink(email, token, browser);
-        if (!issued) throw new HttpError(429, 'Too many sign-in requests. Please try again later.');
-        if (issued) {
-          const link = `${base.origin}/sign-in/verify#${token}`;
-          let delivered = false;
-          try {
-            const response = await fetch('https://api.resend.com/emails', {method:'POST', headers:{Authorization:`Bearer ${apiKey}`, 'Content-Type':'application/json'}, body:JSON.stringify({from,to:[email],subject:'Your Comex sign-in link',text:`Open this link to sign in. It expires in 15 minutes.\n\n${link}\n\nIf you did not request it, you can ignore this email.`})});
-            delivered = response.ok;
-          } catch { /* Preserve a generic provider error without logging credentials or links. */ }
-          if (!delivered) { store.invalidateLink(token); throw new HttpError(502, 'Could not send the sign-in email. Please try again.'); }
-        }
-        const response = reply({message:'If the address can receive email, a sign-in link is on its way.'});
-        if (issued) response.cookies.set('comex_login', browser, {httpOnly:true, sameSite:'lax', secure:base.protocol === 'https:', path:'/', maxAge:15*60});
+        const configuredUrl=process.env.COMEX_APP_URL, apiKey=process.env.RESEND_API_KEY, from=process.env.COMEX_EMAIL_FROM, secret=process.env.COMEX_AUTH_SECRET;
+        if (!configuredUrl || !apiKey || !from || !secret || secret.length<32) throw new HttpError(503,'Email sign-in is not configured yet.');
+        let base:URL;
+        try {base=new URL(configuredUrl);} catch {throw new HttpError(503,'Email sign-in is not configured yet.');}
+        if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(base.hostname))) || base.username || base.password || base.pathname !== '/' || base.search || base.hash || base.origin !== requestOrigin) throw new HttpError(503,'Email sign-in is not configured for this address.');
+        const existingBrowser=request.cookies.get('comex_login')?.value;
+        const browser=existingBrowser && /^[a-f0-9]{64}$/.test(existingBrowser) ? existingBrowser : randomBytes(32).toString('hex');
+        const guestToken=request.cookies.get('comex_session')?.value;
+        const validGuestToken=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? guestToken : null;
+        // An explicit choice from the browser owning the guest cookie permits
+        // correcting its email; account access still requires the emailed code.
+        if (claimGuest && (!validGuestToken || !store.updateGuestEmail(validGuestToken,email))) throw new HttpError(409,'This browser draft session has expired.');
+        const guestIdentity=validGuestToken ? store.guestIdentity(validGuestToken) : null;
+        const mayClaim=!!validGuestToken && (guestIdentity ? guestIdentity.email===email : !store.hasGuestToken(validGuestToken));
+        // The existing guest cookie is stable across simultaneous requests,
+        // unlike login cookies whose responses can arrive out of order.
+        const claimProof=mayClaim ? validGuestToken! : browser;
+        const code=randomInt(100000000).toString().padStart(8,'0');
+        const issued=store.issueCode(email,code,claimProof,secret);
+        if (!issued) throw new HttpError(429,'Too many sign-in requests. Please try again later.');
+        let delivered=false, knownRejected=false;
+        try {
+          const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json'},body:JSON.stringify({from,to:[email],subject:'Your Comex sign-in code',text:`Your Comex sign-in code is ${code}. It expires in 15 minutes.\n\nIf you did not request it, ignore this email.`})});
+          delivered=response.ok;
+          knownRejected=response.status>=400 && response.status<500 && response.status!==408;
+        } catch { /* Never log credentials or codes. */ }
+        if (!delivered) {store.invalidateCode(email,issued,knownRejected);throw new HttpError(502,'Could not send the sign-in email. Please try again.');}
+        const response=reply({message:'If the address can receive email, a sign-in code is on its way.'});
+        response.cookies.set('comex_login',browser,{httpOnly:true,sameSite:'lax',secure:base.protocol==='https:',path:'/',maxAge:15*60});
         return response;
       }
-      if (segments.length === 2 && segments[1] === 'inspect' && method === 'POST') {
-        const {token} = await input(request, z.object({token:z.string().regex(/^[a-f0-9]{64}$/)}).strict());
-        const link = store.inspectLink(token);
-        if (!link) throw new HttpError(400, 'This link has expired or was already used. Request a new one.');
-        return reply({email:link.email});
-      }
       if (segments.length === 2 && segments[1] === 'verify' && method === 'POST') {
-        const {token} = await input(request, z.object({token:z.string().regex(/^[a-f0-9]{64}$/)}).strict());
-        const browser = request.cookies.get('comex_login')?.value;
-        const anonymous = request.cookies.get('comex_session')?.value;
-        const result = store.consumeLink(token,browser && /^[a-f0-9]{64}$/.test(browser) ? browser : null,anonymous && /^[a-f0-9]{64}$/.test(anonymous) ? anonymous : null);
-        if (!result) throw new HttpError(400, 'This link has expired or was already used. Request a new one.');
-        const response = reply({user:{email:result.email}});
-        response.cookies.set('comex_auth',result.session,{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:30*24*60*60});
+        const {email:rawEmail,code}=await input(request,z.object({email:z.string().trim().email().max(254),code:z.string().regex(/^\d{8}$/)}).strict());
+        const at=rawEmail.lastIndexOf('@'); const email=`${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}`;
+        const secret=process.env.COMEX_AUTH_SECRET;
+        if (!secret || secret.length<32) throw new HttpError(503,'Email sign-in is not configured yet.');
+        const browser=request.cookies.get('comex_login')?.value, guest=request.cookies.get('comex_session')?.value;
+        const validGuest=guest && /^[a-f0-9]{64}$/.test(guest) ? guest : null;
+        const identity=validGuest ? store.guestIdentity(validGuest) : null;
+        const anonymous=validGuest ? identity ? identity.email===email ? identity.owner : null : store.hasGuestToken(validGuest) ? null : validGuest : null;
+        const claimProof=anonymous && validGuest ? validGuest : browser && /^[a-f0-9]{64}$/.test(browser) ? browser : null;
+        const result=store.consumeCode(email,code,secret,claimProof,anonymous);
+        if (!result) throw new HttpError(400,'This code is invalid, expired, or has already been used. Request a new code.');
+        const response=reply({user:{email:result.email}});
+        response.cookies.set('comex_auth',result.session,{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
         if (result.sameBrowser) {
-          response.cookies.set('comex_login','',{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:0});
-          response.cookies.set('comex_session','',{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:0});
+          response.cookies.set('comex_login','',{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:0});
+          if (anonymous) response.cookies.set('comex_session','',{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:0});
         }
         return response;
       }
@@ -385,12 +426,19 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     }
     if (segments.length === 1 && method === 'POST') {
       const body = await input(request, createSchema);
-      const session = owner(request);
-      if (!session) throw new HttpError(401, 'Sign in before creating a comic.');
+      let session = owner(request);
+      let guestToken: string | null = null;
+      if (!session) {
+        if (!body.email) throw new HttpError(401, 'Enter your email to start creating.');
+        const at=body.email.lastIndexOf('@'); const email=`${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}`;
+        const guest=store.createGuest(email); session=guest.owner; guestToken=guest.token;
+      }
       const id = randomUUID();
       const draft: Draft = {...createBlankComic(id, session), title: body.title, plot: body.plot, styleId: body.style, characters: [], answers: {}, questions: []};
       store.create(id, session, draft);
-      return reply({comic: {id}}, 201);
+      const response=reply({comic: {id}}, 201);
+      if (guestToken) response.cookies.set('comex_session',guestToken,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
+      return response;
     }
     if (segments.length < 2) throw new HttpError(404, 'Not found.');
     const id = segments[1];
@@ -457,15 +505,27 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (data.operations?.[op]) throw new HttpError(409, 'This image request is already running or has an unknown outcome.');
       const reserved: Draft = {...data, operations:{...data.operations,[op]:'running'}};
       if (!store.update(id, session, revision, reserved)) throw new HttpError(409, 'Draft changed; refresh and try again.');
+      let assetId: string | undefined;
+      let assetCommitted = false;
       try {
         const bytes = await ai().characterReference({character,styleRules:styleRules(data.styleId)});
-        const assetId = await saveAsset(bytes);
-        const latest = store.getOwned<Draft>(id,session);
-        if (!latest || latest.revision !== revision + 1) throw new HttpError(409, 'Draft changed while rendering; the result was not applied.');
-        const { [op]: ignored, ...operations } = latest.data.operations ?? {}; void ignored;
-        const characters = latest.data.characters.map(c => c.id === character.id ? {...c, approved:false, referenceAssetId:assetId, referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`} : c);
-        return reply({comic: save(store,session,latest.revision,{...latest.data,characters,operations})});
+        assetId = await saveAsset(bytes);
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const latest = store.getOwned<Draft>(id,session);
+          const current = latest?.data.characters.find(c => c.id === character.id);
+          if (!latest || latest.data.operations?.[op] !== 'running' || latest.data.pages.length || latest.data.styleId !== data.styleId || JSON.stringify(current) !== JSON.stringify(character))
+            throw new HttpError(409, 'Character inputs changed while rendering; the result was not applied.');
+          const { [op]: ignored, ...operations } = latest.data.operations ?? {}; void ignored;
+          const characters = latest.data.characters.map(c => c.id === character.id ? {...c, approved:false, referenceAssetId:assetId, referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`} : c);
+          const updated = {...latest.data,characters,operations};
+          if (store.update(id,session,latest.revision,updated)) {
+            assetCommitted = true;
+            return reply({comic:view(updated,store.getPublished<Edition>(id),latest.revision + 1)});
+          }
+        }
+        throw new HttpError(409, 'Draft changed while saving the reference.');
       } catch (error) {
+        if (assetId && !assetCommitted) await discardAsset(assetId);
         const latest = store.getOwned<Draft>(id,session);
         if (latest?.data.operations?.[op] === 'running') {
           const operations = {...latest.data.operations};

@@ -2,7 +2,7 @@
 
 Requires Bun 1.4.4 and Node.js 22.13 or newer (the local store uses node:sqlite). Install project dependencies with `bun install --frozen-lockfile`, then run `bun run dev` and open the local URL printed by Next.js. Run `bun run test`, `bun run typecheck`, and `bun run build` for local verification.
 
-Email sign-in requires `COMEX_APP_URL` set to the exact browser origin, `COMEX_EMAIL_FROM` set to a verified Resend sender, and `RESEND_API_KEY` provided through 1Password. The app sends a 15-minute single-use link; the recipient confirms the displayed email before signing in. Signing in claims existing anonymous drafts only when the link is opened in the browser that requested it. Sign-in is required to create or edit drafts; the published gallery remains public. Missing delivery configuration is reported in the sign-in screen. The SQLite-backed identity and draft store is for a single local instance and is not suitable for Vercel deployment without managed persistence and a public authentication boundary.
+Creators can enter an email address and start a browser-local draft immediately. To access drafts across browsers, verify the email by signing in from the same browser; only then are those drafts claimed by the verified account. Other browsers can sign in with a code but cannot claim the first browser's local drafts. Guest sessions expire after 30 days on both server and browser; draft data is retained but inaccessible through an expired guest session. If an email was mistyped, the guest owner can explicitly choose to save the browser's drafts to the corrected address before verifying it. Email sign-in requires `COMEX_APP_URL` set to the exact browser origin, a verified `COMEX_EMAIL_FROM` sender, `RESEND_API_KEY`, and a randomly generated `COMEX_AUTH_SECRET` of at least 32 characters, stored securely in 1Password. The app emails a single-use eight-digit code that expires in 15 minutes. The gallery remains public. Missing delivery configuration is reported in the sign-in screen. The local SQLite store is not suitable for Vercel deployment without managed persistence and a public authentication boundary.
 
 Real generation requires an OpenAI API key and accessible text and image models. Keep credentials in 1Password; resolve them into the local process only when needed. Never commit `.env.local` or paste credentials into issues, prompts, or logs. See `.env.example` for configuration names. Provisioning, hosted storage, Vercel linkage, and secret synchronization are not validated by a local run.
 
@@ -49,3 +49,17 @@ COMEX_DB_PATH=/path/to/comex.sqlite bun scripts/resolve-image-operation.ts COMIC
 ```
 
 The command releases only that operation, increments the draft revision and never refunds the call or retries it. If the provider completed work that was not saved, a later user-initiated retry can incur another charge. Do not run it while any request may still be in flight. Story-text operations use the separate recovery procedure above.
+
+If the app stops after saving a panel image but before its visual review finishes, that panel may remain in `checking`. Stop **all** Comex processes and reconcile any outstanding provider reservation first. After backing up the draft database, find the comic ID in its URL and list the panels awaiting review:
+
+```sh
+COMEX_DB_PATH=/path/to/comex.sqlite bun scripts/resolve-visual-review.ts COMIC_ID --list
+```
+
+Choose the affected panel ID and explicitly mark that review incomplete:
+
+```sh
+COMEX_DB_PATH=/path/to/comex.sqlite bun scripts/resolve-visual-review.ts COMIC_ID PANEL_ID --confirm
+```
+
+This preserves the image and records a failed review for that exact image and version. The creator must inspect and accept it before it can be treated as ready. No provider call is retried or refunded. Never run this command while a review may still be in flight.

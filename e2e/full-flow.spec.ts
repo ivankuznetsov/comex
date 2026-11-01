@@ -35,6 +35,7 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
     await expect(page.getByRole('img', {name:`Page ${i}, panel 3`})).toBeVisible({timeout:40_000});
     for (let j = 1; j <= 3; j++) {
       await page.getByRole('img', {name:`Page ${i}, panel ${j}`}).click();
+      await expect(page.getByText('Automated review completed without findings. Inspect the panel before accepting.')).toBeVisible();
       await page.getByRole('button', {name:'Accept and continue'}).click();
     }
     await expect(page.getByRole('link', {name:'Download page'})).toBeVisible();
