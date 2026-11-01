@@ -18,6 +18,7 @@ function fixture(overrides:Record<string,unknown> = {}, local = new LocalStore('
   let providerCalls = 0;
   const inputs: unknown[] = [];
   const provider = () => ({
+    async visualScreen() { return {needsDiagnosis:true}; },
     async questions(input: unknown) { providerCalls++; inputs.push(input); return [{id:'ignored', question:'Who gets the key?', suggestedAnswer:'Her brother'}]; },
     async characterSuggestions(input: unknown) { providerCalls++; inputs.push(input); return [{name:'Mina',role:'courier',appearance:'curly hair',outfit:'coat'}]; },
     ...overrides,

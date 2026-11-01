@@ -28,7 +28,7 @@ Every model call is a small, typed request behind one service (`src/lib/ai/servi
 | Storyboard | Responses | `gpt-6.1-terra` | Plot, answers, cast, page and panel counts. Returns a story bible and per-panel beats, dialogue and scene state. Code rejects wrong counts, duplicate ids, unknown characters and speakers who are not in the panel. A deterministic ledger then checks scene state carries across page breaks. |
 | Narrative review | Responses | `gpt-6.1-terra` | Goal, answers, bible and beats. Returns pass / findings. |
 | Panel art | Images: edits | `gpt-image-2.5-flare` | Panel spec, previous scene state, and the approved reference image of every character in the panel, plus the previous panel for continuity. |
-| Visual review | Responses with image input | `gpt-6.1-terra` | The rendered panel and references at high detail, plus bible and beats. Returns findings per issue, with "not observable" instead of guessing. |
+| Visual review | Decisions, then Responses when needed | `gpt-6-luna`, then `gpt-6.1-terra` | Decisions checks the panel, beat and labelled references for visible action, appearance, state, composition and style. A mismatch, obscured detail or refusal goes to Responses for detailed findings. Checks remain advisory. |
 | Edit routing | Responses | `gpt-6.1-terra` | The creator's edit request. Classifies it as artwork only, story change, or uncertain, so a story change goes through revision instead of a repaint. |
 | Artwork edit | Images: edits | `gpt-image-2.5-flare` | The target panel first, then references, with an explicit list of what must not change. |
 | Story revision | Responses | `gpt-6.1-terra` | The storyboard, the requested panel and the frozen earlier panels. Returns a revised suffix; code rejects any change to frozen panels or ids. The creator previews before/after beats before applying. |
@@ -36,7 +36,7 @@ Every model call is a small, typed request behind one service (`src/lib/ai/servi
 **Decisions behind it**
 
 - **Structured outputs only.** Text calls use `text.format: json_schema` with `strict: true`, generated from Zod schemas, then re-validated in code. Refusals and incomplete responses become clear errors instead of half-saved state.
-- **`store: false`, medium reasoning.** We keep no conversation state at OpenAI; every call carries the context it needs.
+- **`store: false`, medium reasoning for Responses.** Each request carries the context it needs.
 - **References over descriptions.** Panels are drawn with Images edits from the approved character sheets, not from text alone. That is what keeps the same girl and the same cat across nine panels.
 - **Reviews are advisory.** The visual and narrative judges flag drift but never block drawing or publishing; the creator decides.
 - **Every call is budgeted.** A persistent SQLite reservation is taken before each request (`COMEX_MAX_PROVIDER_CALLS`, `COMEX_MAX_CONCURRENT_CALLS`). Uncertain outcomes stay reserved so a timeout never silently triggers a paid duplicate.

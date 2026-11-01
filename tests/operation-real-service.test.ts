@@ -32,6 +32,7 @@ function pause() {
 }
 class FakeProvider {
   readonly calls:string[]=[];
+  screenChoices:('match'|'cannot_determine')[]=[];
   unknownOnce:string|undefined;
   paused?:{name:string;gate:ReturnType<typeof pause>};
   async fetch(url:string|URL|Request,init?:RequestInit):Promise<Response> {
@@ -40,12 +41,14 @@ class FakeProvider {
     let name:string,body:any;
     if(target.endsWith('/responses')) {
       body=JSON.parse(String(init?.body));name=body.text.format.name;
-    } else if(target.endsWith('/images/generations'))name='character_reference';
+    } else if(target.endsWith('/decisions')){body=JSON.parse(String(init?.body));name='visual_screen';}
+    else if(target.endsWith('/images/generations'))name='character_reference';
     else if(target.endsWith('/images/edits'))name='panel_image';
     else throw new Error('Unexpected provider endpoint.');
     this.calls.push(name);
     if(this.paused?.name===name){const gate=this.paused.gate;this.paused=undefined;gate.signal();await gate.wait;}
     if(this.unknownOnce===name){this.unknownOnce=undefined;throw new Error('Simulated lost response');}
+    if(name==='visual_screen') {const selected=this.screenChoices.shift() ?? 'cannot_determine';return Response.json({model:'gpt-6-luna',answers:body.questions.map((q:{name:string;choices:{value:string}[]})=>({type:'choice',name:q.name,choice:selected,confidence:1,probabilities:q.choices.map(choice=>({value:choice.value,probability:choice.value===selected?1:0}))}))});}
     if(name==='character_reference'||name==='panel_image')return Response.json({data:[{b64_json:png.toString('base64')}]});
     if(name==='narrative_questions')return wrap({questions:[{id:'provider-question',question:'Who receives the key?',suggested_answer:'Her brother'}]});
     if(name==='character_suggestions')return wrap({characters:[card]});
@@ -148,15 +151,18 @@ pgTest('real executor and service persist the guided workflow from questions thr
   await h.execute('approveStory',{storyRevision:storyView.storyRevision,fingerprint:storyView.storyApproval.fingerprint},id);
   const page=(await h.comic(id)).draft.pages[0];
   await expect(h.enqueue('generatePage',{pageId:page.id,intent:'resume'},id)).rejects.toMatchObject({code:'conflict'});
+  h.provider.screenChoices=['match','cannot_determine'];
   const pageJob=await h.enqueue('generatePage',{pageId:page.id,intent:'generate'},id);
   await h.executor.execute(pageJob.id);
   const afterPage=await h.comic(id),rendered=afterPage.draft.pages[0];
   expect(rendered.panels).toHaveLength(2);expect(rendered.panels.every(p=>!!p.assetId)).toBe(true);
-  for(const panel of rendered.panels) {
+  for(const [index,panel] of rendered.panels.entries()) {
     expect((await h.repo.getStep(owner,pageJob.id,`panel/${panel.id}/image`))?.state).toBe('completed');
-    expect((await h.repo.getStep(owner,pageJob.id,`panel/${panel.id}/visual-review`))?.state).toBe('completed');
+    expect((await h.repo.getStep(owner,pageJob.id,`panel/${panel.id}/visual-screen`))?.state).toBe('completed');
+    const review=await h.repo.getStep(owner,pageJob.id,`panel/${panel.id}/visual-review`);
+    if(index===0)expect(review).toBeNull();else expect(review?.state).toBe('completed');
   }
-  expect(h.provider.calls).toEqual(['narrative_questions','character_suggestions','character_reference','storyboard','narrative_judgment','panel_image','visual_judgment','panel_image','visual_judgment']);
+  expect(h.provider.calls).toEqual(['narrative_questions','character_suggestions','character_reference','storyboard','narrative_judgment','panel_image','visual_screen','panel_image','visual_screen','visual_judgment']);
   const pageOperation=await h.repo.getOwned(owner,pageJob.id);
   if(pageOperation?.status!=='succeeded') {
     const prepared=await h.repo.getCheckpoint(owner,pageJob.id,`page/${page.id}/prepared`) as any;
@@ -211,7 +217,7 @@ pgTest('an MCP client and browser projection share the real Postgres guided work
     comic=await current(id);await execute('comex_generate_page',{comicId:id,expectedRevision:comic.revision,pageId:comic.pages[0].id,intent:'generate'});
     comic=await current(id);expect(comic.pages[0].panels.every((panel:{imageUrl:string|null})=>!!panel.imageUrl)).toBe(true);
     expect((await backend.service.get(owner,id)).comic.pages).toEqual(comic.pages);
-    expect(h.provider.calls).toEqual(['narrative_questions','character_suggestions','character_reference','storyboard','narrative_judgment','panel_image','visual_judgment','panel_image','visual_judgment']);
+    expect(h.provider.calls).toEqual(['narrative_questions','character_suggestions','character_reference','storyboard','narrative_judgment','panel_image','visual_screen','visual_judgment','panel_image','visual_screen','visual_judgment']);
   } finally {await client.close();}
 }));
 

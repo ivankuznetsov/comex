@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import type {AIOptions, createAIService, Reference, RevisionResult, Storyboard} from '../ai/service';
+import type {AIOptions, CharacterInput, createAIService, Reference, RevisionResult, Storyboard} from '../ai/service';
 import type {ComicDraft} from '../domain/comic';
 
 export type Actor = string;
@@ -60,7 +60,7 @@ export interface ComicDependencies {
   advisory?: {
     resolve?(draft:Draft):Draft;
     narrative(draft:Draft):void;
-    visual(input:{draft:Draft;panelId:string;assetId:string;panelRevision:number;bible:Storyboard['bible'];styleRules:string;beats:Omit<Storyboard['pages'][number]['panels'][number],'dialogue'>;references:Reference[]}):void;
+    visual(input:{draft:Draft;panelId:string;assetId:string;panelRevision:number;bible:Storyboard['bible'];styleRules:string;beats:Omit<Storyboard['pages'][number]['panels'][number],'dialogue'>;characters:CharacterInput[];references:Reference[]}):void;
   };
   id(): string;
 }

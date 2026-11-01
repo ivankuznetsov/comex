@@ -3,7 +3,8 @@ import {resolve} from 'node:path';
 import {mkdir, open, readFile, unlink} from 'node:fs/promises';
 import {NextRequest, NextResponse} from 'next/server';
 import {z} from 'zod';
-import {createAIService, AIError, type Reference, type Storyboard} from './ai/service';
+import {createAIService, AIError, type CharacterInput, type Reference, type Storyboard} from './ai/service';
+import {reviewVisual} from './ai/visual-screen';
 import {LocalStore, ClaimInProgressError, type PageJob} from './local-store';
 import {createBudgetedFetch, BudgetError} from './budget';
 import {createComicService} from './application/comics';
@@ -140,11 +141,13 @@ function scheduleNarrativeReview(store:LocalStore,draft:Draft) {
     store.putAdvisoryReview(draft.id,latest.owner,`story:${runId}:${draft.storyRevision}`,review);
   })().catch(()=>{});
 }
-function scheduleVisualReview(store:LocalStore,input:{draft:Draft;panelId:string;assetId:string;panelRevision:number;bible:Storyboard['bible'];styleRules:string;beats:Omit<Storyboard['pages'][number]['panels'][number],'dialogue'>;references:Reference[]}) {
+function scheduleVisualReview(store:LocalStore,input:{draft:Draft;panelId:string;assetId:string;panelRevision:number;bible:Storyboard['bible'];styleRules:string;beats:Omit<Storyboard['pages'][number]['panels'][number],'dialogue'>;characters:CharacterInput[];references:Reference[]}) {
   void (async()=>{
     let findings:unknown[]=[],outcome='failed';
     try {
-      const result=await advisoryProvider().visualJudge({bible:input.bible,styleRules:input.styleRules,beats:input.beats,references:[...input.references,{role:'generated panel',id:input.panelId,bytes:await asset(input.assetId),mimeType:'image/png'}]});
+      const provider=advisoryProvider();
+      const reviewInput={bible:input.bible,styleRules:input.styleRules,beats:input.beats,characters:input.characters,references:[...input.references,{role:'generated panel',id:input.panelId,bytes:await asset(input.assetId),mimeType:'image/png' as const}]};
+      const result=await reviewVisual({screen:()=>provider.visualScreen(reviewInput),diagnose:()=>provider.visualJudge(reviewInput)});
       findings=result.findings;outcome=result.outcome;
     } catch { /* Retain the generated image with an incomplete review. */ }
     const latest=store.getReviewTarget<Draft>(input.draft.id);

@@ -15,6 +15,7 @@ test('a client follows the shared guided workflow through queued fake-provider o
   let providerCalls=0, images=0;
   const finding={severity:'blocker',dimension:'story',panel_id:'p1',character_id:null,reference_id:null,expected:'key',observed:'key missing',repair:'restore key'};
   const provider=()=>({
+    async visualScreen(){return {needsDiagnosis:true};},
     async questions(){providerCalls++;return [{id:'ignored',question:'Who gets the key?',suggestedAnswer:'Her brother'}];},
     async characterSuggestions(){providerCalls++;return [{name:'Mina',role:'courier',appearance:'red hair',outfit:'coat'}];},
     async characterReference(){providerCalls++;return png;},

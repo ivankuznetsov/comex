@@ -1,4 +1,5 @@
-import {AIError, type Reference} from './service';
+import {AIError} from './errors';
+import type {Reference} from './service';
 import {BudgetError, finalizeBudgetedResponse} from '../budget';
 import {observeSafely, responseObservation, type ResponseObservation} from './response-metadata';
 
