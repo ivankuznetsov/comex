@@ -4,6 +4,8 @@ Turn a story idea into a comic, with original characters, editable pages, and a 
 
 The current build runs locally. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
 
+[Watch the 43-second demo](docs/demo/comex-demo-simulated.mp4). It uses simulated AI and email providers with example artwork; it does not demonstrate live email delivery.
+
 ## Local setup
 
 Install Bun 1.4.4 and Node.js 22.13 or later. In this checkout:
