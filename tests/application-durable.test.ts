@@ -32,6 +32,7 @@ function fixture(overrides:Record<string,unknown>={},useDurable=true,id:()=>stri
     async characterReference(){calls.push('reference');return png;},
     async panel(){calls.push('panel');return png;},
     async editPanel(){calls.push('edit');return png;},
+    async visualScreen(){return {needsDiagnosis:true};},
     async visualJudge(){calls.push('visual');return {outcome:'pass',findings:[]};},
     ...overrides,
   } as any;};
@@ -46,7 +47,7 @@ function fixture(overrides:Record<string,unknown>={},useDurable=true,id:()=>stri
     async checkpoint(key:string,work:(repository:any)=>Promise<unknown>){if(checkpoints.has(key))return structuredClone(checkpoints.get(key));const value=await work(transaction);const json=JSON.parse(JSON.stringify(value));checkpoints.set(key,json);if(crash===`checkpoint:${key}`){crash='';throw new Crash(key);}return structuredClone(json);},
     async paid(step:{id:string;input:unknown;expectedRevision:number},invoke:(fetch:typeof fetchMarker)=>Promise<unknown>){if(paid.has(step.id)){const value=paid.get(step.id);if(value instanceof Error)throw value;return value;}if(budgetFailure===step.id)throw new BudgetError('budget_exhausted','Budget exhausted');if(revoked===step.id)throw new Error('The connection was revoked or expired.');const value=await invoke(fetchMarker);paid.set(step.id,value);if(Buffer.isBuffer(value))imageIds.set(step.id,await assets.save(value));if(crash===`paid:${step.id}`){crash='';throw new Crash(step.id);}return value;},
     async assetIdFor(id:string){return imageIds.get(id)??null;},
-    async stepState(id:string){return paid.has(id) ? paid.get(id) instanceof Error ? 'failed' : 'completed' : 'unknown';},
+    async stepState(id:string){return paid.has(id) ? paid.get(id) instanceof Error ? 'failed' : 'completed' : null;},
   };
   const service=createComicService({repository:local,assets,provider,budgetFetch:async()=>{throw new Error('local budget fetch used');},id,...(useDurable?{durable}:{})} as any);
   return {local,service,durable,calls,files,checkpoints,paid,usedFetch,fetchMarker,crashAt:(value:string)=>{crash=value;},failBudgetAt:(value:string)=>{budgetFailure=value;},revokeAt:(value:string)=>{revoked=value;},reset:()=>{paid.clear();checkpoints.clear();imageIds.clear();crash='';budgetFailure='';revoked='';operationToken=randomUUID();},replaceTextLockOwner:(id:string)=>{lockOwners.set(id,randomUUID());},completeImage:async(step:string)=>{paid.set(step,png);imageIds.set(step,await assets.save(png));}};
@@ -82,6 +83,44 @@ describe('durable comic phases',()=>{
       return page.comic.pages[0].panels.map(panel=>({evaluation:panel.evaluation,outcome:panel.reviewOutcome}));
     }
     try{expect(await run(worker,true)).toEqual(await run(browser,false));}finally{browser.local.close();worker.local.close();}
+  });
+  test('durable visual screens can pass without a Responses call',async()=>{
+    let screens=0;const f=fixture({async visualScreen(){screens++;return {needsDiagnosis:false};}});try {
+      const id=await planned(f),revision=f.local.getOwned(id,owner)!.revision;
+      const result=await f.service.generatePage(owner,id,'page1',{intent:'generate'},revision);
+      expect(screens).toBe(2);expect(f.calls.filter(call=>call==='visual')).toHaveLength(0);
+      expect(result.comic.pages[0].panels.every(panel=>panel.reviewOutcome==='pass')).toBe(true);
+      expect(f.paid.has('panel/p1/visual-screen')).toBe(true);
+    }finally{f.local.close();}
+  });
+  test('a crash after a Decisions screen replays it before detailed review',async()=>{
+    let screens=0;const f=fixture({async visualScreen(){screens++;return {needsDiagnosis:true};}});try {
+      const id=await planned(f),revision=f.local.getOwned(id,owner)!.revision;
+      f.crashAt('paid:panel/p1/visual-screen');await expect(f.service.generatePage(owner,id,'page1',{intent:'generate'},revision)).rejects.toBeInstanceOf(Crash);
+      await f.service.generatePage(owner,id,'page1',{intent:'generate'},revision);
+      expect(screens).toBe(2);expect(f.calls.filter(call=>call==='visual')).toHaveLength(2);
+    }finally{f.local.close();}
+  });
+  test('an in-flight legacy Responses review replays without adding a Decisions call',async()=>{
+    let screens=0;const f=fixture({async visualScreen(){screens++;return {needsDiagnosis:true};}});try {
+      const id=await planned(f),revision=f.local.getOwned(id,owner)!.revision;
+      f.crashAt('paid:panel/p1/visual-review');await expect(f.service.generatePage(owner,id,'page1',{intent:'generate'},revision)).rejects.toBeInstanceOf(Crash);
+      f.paid.delete('panel/p1/visual-screen');
+      await f.service.generatePage(owner,id,'page1',{intent:'generate'},revision);
+      expect(screens).toBe(2);expect(f.paid.has('panel/p1/visual-screen')).toBe(false);
+    }finally{f.local.close();}
+  });
+  test('an unknown Decisions result preserves the image and resumes only after reconciliation',async()=>{
+    let screens=0;const f=fixture({async visualScreen(){screens++;throw new AIError('unknown_outcome','Unknown screen');}});try {
+      const id=await planned(f),revision=f.local.getOwned(id,owner)!.revision;
+      await expect(f.service.generatePage(owner,id,'page1',{intent:'generate'},revision)).rejects.toMatchObject({code:'unknown_outcome'});
+      expect(f.calls.filter(call=>call==='visual')).toHaveLength(0);
+      expect(f.local.getOwned<any>(id,owner)!.data.operations['panel:p1']).toBe('unknown_outcome');
+      f.paid.set('panel/p1/visual-screen',{needsDiagnosis:false});f.paid.set('panel/p2/visual-screen',{needsDiagnosis:false});
+      const result=await f.service.generatePage(owner,id,'page1',{intent:'generate'},revision);
+      expect(result.comic.pages[0].panels[0].reviewOutcome).toBe('pass');
+      expect(f.local.getOwned<any>(id,owner)!.data.operations?.['panel:p1']).toBeUndefined();expect(screens).toBe(1);
+    }finally{f.local.close();}
   });
   test('current checking artwork can be used to resume the next panel',async()=>{
     const f=fixture();try{

@@ -4,11 +4,10 @@ import { z } from 'zod';
 import { BudgetError, finalizeBudgetedResponse } from '../budget';
 import { EDIT_INTENTS, type EditIntent } from '../edit-routing';
 import { observeSafely, type ResponseObservation } from './response-metadata';
+import { AIError } from './errors';
+import { createVisualScreen, type VisualScreenInput } from './visual-screen';
 
-export type AIErrorCode = 'missing_key' | 'provider_error' | 'unknown_outcome' | 'invalid_response' | 'refusal' | 'invalid_input';
-export class AIError extends Error {
-  constructor(public code: AIErrorCode, message: string) { super(message); this.name = 'AIError'; }
-}
+export { AIError, type AIErrorCode } from './errors';
 export type CharacterInput = { id: string; name: string; role: string; appearance: string; outfit: string };
 export type Reference = { role: string; id: string; bytes: Uint8Array; mimeType: 'image/png' | 'image/jpeg' | 'image/webp' };
 export type StoryInput = { plot: string; answers: Record<string, string>; styleRules: string; characters: CharacterInput[]; pageCount: number; panelsPerPage: number };
@@ -207,6 +206,10 @@ export function createAIService(options: AIOptions = {}) {
       } : undefined);
       if (result.outcome === 'pass' && result.findings.length) throw new AIError('invalid_response','Inconsistent judgment result.');
       return result;
+    },
+    async visualScreen(input: VisualScreenInput): Promise<{needsDiagnosis:boolean}> {
+      checkReferences(input.references);
+      return createVisualScreen({apiKey:key,fetch:request,observeResponse:options.observeResponse})(input);
     },
     characterReference(input: {character:CharacterInput;styleRules:string}): Promise<Buffer> {
       return image(fill(prompt('character-reference','Template'),{character_card:input.character,style_rules:input.styleRules}));

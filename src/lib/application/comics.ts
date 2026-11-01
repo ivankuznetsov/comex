@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import sharp from 'sharp';
 import { AIError, type Storyboard, type Reference } from '../ai/service';
+import {reviewVisual} from '../ai/visual-screen';
 import {BudgetError} from '../budget';
 import stylePresets from '../../../prompts/styles.json';
 import { displayDialogueLines } from '../lettering';
@@ -530,9 +531,14 @@ export function createComicService(deps: ComicDependencies) {
         const reviewInput={bible:base.data.storyboard!.bible,styleRules:styleRules(base.data.styleId),beats:base.visualSpec,references:referenceIds};
         let findings:Awaited<ReturnType<ReturnType<typeof ai>['visualJudge']>>['findings']=[],outcome:PanelReview['outcome']='failed',revocation:unknown;
         try {
-            const result=await durable().paid({id:`${prefix}/visual-review`,input:asJson(reviewInput),expectedRevision:latest.revision},async fetch=>{
-                const references:Reference[]=await Promise.all(referenceIds.map(async ref=>({role:ref.role,id:ref.id,bytes:await asset(ref.assetId),mimeType:'image/png' as const})));
-                return deps.provider({fetch}).visualJudge({...reviewInput,references});
+            // Older in-flight operations may already have a Responses review step.
+            // Replay that step rather than adding another paid call on resume.
+            const priorReview=await durable().stepState?.(`${prefix}/visual-review`);
+            const loadReferences=async ():Promise<Reference[]>=>Promise.all(referenceIds.map(async ref=>({role:ref.role,id:ref.id,bytes:await asset(ref.assetId),mimeType:'image/png' as const})));
+            const screenInput={...reviewInput,characters:base.characters.map(({id,name,role,appearance,outfit})=>({id,name,role,appearance,outfit}))};
+            const result=await reviewVisual({skipScreen:priorReview!=null,
+                screen:()=>durable().paid({id:`${prefix}/visual-screen`,input:asJson(screenInput),expectedRevision:latest.revision},async fetch=>deps.provider({fetch}).visualScreen({...screenInput,references:await loadReferences()})),
+                diagnose:()=>durable().paid({id:`${prefix}/visual-review`,input:asJson(reviewInput),expectedRevision:latest.revision},async fetch=>deps.provider({fetch}).visualJudge({...reviewInput,references:await loadReferences()})),
             });findings=result.findings;outcome=result.outcome;
         } catch(error){
             if(error instanceof AIError&&(error.code==='unknown_outcome'||error.code==='invalid_response')){
@@ -684,15 +690,17 @@ export function createComicService(deps: ComicDependencies) {
         if (!assetId)
             throw new Error('Panel image was not saved.');
         if(deps.advisory) {
-            deps.advisory.visual({draft,panelId,assetId,panelRevision:panel.revision+1,bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:visualSpec,references});
+            deps.advisory.visual({draft,panelId,assetId,panelRevision:panel.revision+1,bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:visualSpec,characters,references});
             return;
         }
         // Without a local scheduler, the review is recorded inline.
         let findings: Awaited<ReturnType<ReturnType<typeof ai>['visualJudge']>>['findings'] = [];
         let outcome: PanelReview['outcome'] = 'failed';
         try {
-            const result = await ai().visualJudge({ bible: storyboard.bible, styleRules: styleRules(draft.styleId), beats: visualSpec,
-                references: [...references, { role: 'generated panel', id: panelId, bytes: await asset(assetId), mimeType: 'image/png' }] });
+            const provider=ai();
+            const reviewInput={bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:visualSpec,characters,
+                references:[...references,{role:'generated panel',id:panelId,bytes:await asset(assetId),mimeType:'image/png' as const}]};
+            const result=await reviewVisual({screen:()=>provider.visualScreen(reviewInput),diagnose:()=>provider.visualJudge(reviewInput)});
             findings = result.findings;
             outcome = result.outcome;
         }
