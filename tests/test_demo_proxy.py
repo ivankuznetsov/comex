@@ -63,13 +63,13 @@ class DemoProxyTest(unittest.TestCase):
         for thread in cls.threads:
             thread.join(timeout=5)
 
-    def request(self, origin=None, path="/api/comics", headers=None):
+    def request(self, origin=None, path="/api/comics", headers=None, body='{"ok":true}'):
         headers = {"Content-Type": "application/json", **(headers or {})}
         if origin is not None:
             headers["Origin"] = origin
         conn = http.client.HTTPConnection("127.0.0.1", self.gateway.server_address[1], timeout=5)
         self.addCleanup(conn.close)
-        conn.request("POST", path, body='{"ok":true}', headers=headers)
+        conn.request("POST", path, body=body, headers=headers)
         response = conn.getresponse()
         body = response.read()
         return response, body
@@ -104,6 +104,20 @@ class DemoProxyTest(unittest.TestCase):
             with self.subTest(path=path):
                 response, _ = self.request("https://comex.example", path=path)
                 self.assertEqual(response.status, 403)
+
+    def test_reference_upload_has_a_specific_larger_request_limit(self):
+        comic = "11111111-1111-4111-8111-111111111111"
+        character = "22222222-2222-4222-8222-222222222222"
+        path = f"/api/comics/{comic}/characters/{character}/reference/upload"
+        response, body = self.request("https://comex.example", path=path, body="x" * 1_000_001)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(json.loads(body)["body"]), 1_000_001)
+        response, _ = self.request("https://comex.example", path=path, headers={"Content-Length": str(proxy.MAX_REFERENCE_REQUEST + 1)}, body="x")
+        self.assertEqual(response.status, 413)
+        response, _ = self.request("https://comex.example", headers={"Content-Length": "1000001"}, body="x")
+        self.assertEqual(response.status, 413)
+        response, _ = self.request("https://comex.example", path=path + "/extra", headers={"Content-Length": "1000001"}, body="x")
+        self.assertEqual(response.status, 413)
 
     def test_incomplete_body_times_out_without_dispatching_upstream(self):
         previous_requests = self.upstream.requests_received

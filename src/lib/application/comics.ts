@@ -1041,8 +1041,8 @@ export function createComicService(deps: ComicDependencies) {
         const characters=data.characters.map(c=>c.id===itemId?{...c,appearance:body.appearance,outfit:body.outfit,approved:false,referenceAssetId:assetId,referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`}:c);
         const updated={...data,characters};
         try {
-            const saved=store.updateWithoutActivePageJob ? await store.updateWithoutActivePageJob(id,session,revision,updated) : await store.update(id,session,revision,updated);
-            if(!saved)throw new ApplicationError('conflict','This draft changed or a page is being drawn. Refresh and try again.');
+            const saved=store.updateWithoutActiveWork ? await store.updateWithoutActiveWork(id,session,revision,updated) : await store.update(id,session,revision,updated);
+            if(!saved)throw new ApplicationError('conflict','This draft changed or a story or page request is in progress. Refresh and try again.');
         } catch(error) {
             try {
                 const latest=await store.getOwned<Draft>(id,session);

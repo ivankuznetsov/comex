@@ -1258,3 +1258,21 @@ test('an upload cannot attach after the draft changes during multipart transfer'
     expect((await readdir(dir)).length).toBe(0);
   } finally {if(prior===undefined) delete process.env.COMEX_ASSET_PATH; else process.env.COMEX_ASSET_PATH=prior; await rm(dir,{recursive:true,force:true});}
 });
+
+test('a separately reserved story operation blocks upload attachment without changing its draft revision', async () => {
+  const {mkdtemp,rm,readdir}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
+  const sharp=(await import('sharp')).default,dir=await mkdtemp(join(tmpdir(),'comex-upload-story-'));const prior=process.env.COMEX_ASSET_PATH;process.env.COMEX_ASSET_PATH=dir;
+  try {
+    const created=await post('comics',{title:'Story reservation',plot:'A lighthouse',style:'ink-manga'});const {comic}=await created.json();
+    const cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+    const added=await post(`comics/${comic.id}/characters`,{name:'Pip',role:'Keeper',appearance:'Hair',outfit:'Coat'},cookie);const character=(await added.json()).comic.characters[0];
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore,record=store.getOwned<any>(comic.id,owner)!;
+    expect(store.reserveTextOperation(comic.id,owner,record.revision)).toBe(true);
+    const png=await sharp({create:{width:4,height:4,channels:3,background:'#abc'}}).png().toBuffer();
+    const form=new FormData();form.set('image',new File([Uint8Array.from(png)],'pip.png',{type:'image/png'}));form.set('appearance','Hair');form.set('outfit','Coat');form.set('expectedReferenceId','');form.set('expectedCardVersion',character.cardVersion);
+    const path=`comics/${comic.id}/characters/${character.id}/reference/upload`;
+    const response=await handleApi(new NextRequest(`http://localhost:3000/api/${path}`,{method:'POST',headers:{cookie},body:form}),path.split('/'));
+    expect(response.status).toBe(409);expect(store.getOwned<any>(comic.id,owner)!.revision).toBe(record.revision);expect((await readdir(dir)).length).toBe(0);
+    store.finishTextOperation(comic.id,owner,false);
+  } finally {if(prior===undefined)delete process.env.COMEX_ASSET_PATH;else process.env.COMEX_ASSET_PATH=prior;await rm(dir,{recursive:true,force:true});}
+});
