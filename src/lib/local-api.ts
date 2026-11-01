@@ -7,10 +7,11 @@ import {createAIService, AIError, type Reference, type Storyboard} from './ai/se
 import {LocalStore, ClaimInProgressError, type PageJob} from './local-store';
 import {createBudgetedFetch, BudgetError} from './budget';
 import {createComicService} from './application/comics';
-import {ApplicationError, createSchema, parse, type Draft} from './application/contracts';
+import {ApplicationError, createSchema, referenceUploadSchema, parse, type Draft} from './application/contracts';
 import {sameJson} from './application/json';
 import {isPanelReady, type Panel} from './domain/comic';
 import {view as comicView} from './application/views';
+import {readReferenceForm, normalizeReference, UploadError} from './reference-upload';
 import type {PostgresAuth} from './storage/auth';
 export {validateStoryLedger} from './application/comics';
 
@@ -46,7 +47,7 @@ async function owner(request: NextRequest, store: BrowserAuthStore): Promise<str
   // Do not revive expired guests or treat current internal owner IDs as cookies.
   return !await store.hasGuestToken(guest) && await store.hasLegacyOwner(guest) ? guest : null;
 }
-function assertMutation(request: NextRequest) {
+function assertOrigin(request: NextRequest) {
   const origin = request.headers.get('origin');
   if (origin) {
     let supplied: URL;
@@ -54,6 +55,9 @@ function assertMutation(request: NextRequest) {
     const host = request.headers.get('host') ?? request.nextUrl.host;
     if (supplied.host !== host || supplied.protocol !== request.nextUrl.protocol) throw new HttpError(403, 'Cross-origin requests are not allowed.');
   }
+}
+function assertMutation(request: NextRequest) {
+  assertOrigin(request);
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) throw new HttpError(415, 'Send JSON data.');
 }
 async function input<T>(request: NextRequest, schema: z.ZodType<T>): Promise<T> {
@@ -303,6 +307,19 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') return respond(await service.acceptStoryReview(session,id,await body(),initial.revision));
     if (segments[2] === 'story' && segments[3] === 'approve' && segments.length === 4 && method === 'POST') return respond(await service.approveStory(session,id,await body(),initial.revision));
     if (segments[2] === 'story' && segments[3] === 'plan' && segments.length === 4 && method === 'POST') return respond(await service.planStory(session,id,await body(),initial.revision));
+    if (!backend && segments[2] === 'characters' && segments.length === 6 && segments[4] === 'reference' && segments[5] === 'upload' && method === 'POST') {
+      assertOrigin(request);
+      const character=initial.characters.find(item=>item.id===segments[3]);
+      if(!character)throw new HttpError(404,'Character not found.');
+      if(character.lockedByStory)throw new HttpError(409,'This character is already in the story. Changing their reference requires revising the story.');
+      if(character.referenceStatus === 'running' || character.referenceStatus === 'unknown_outcome')throw new HttpError(409,'This image request is already running or has an unknown outcome.');
+      const form=await readReferenceForm(request), allowed=['image','appearance','outfit','expectedReferenceId','expectedCardVersion'];
+      if([...form.keys()].some(key=>!allowed.includes(key)) || allowed.some(key=>form.getAll(key).length!==1))throw new HttpError(400,'Please provide one image and its character details.');
+      const image=form.get('image');
+      const parsed=referenceUploadSchema.safeParse({appearance:form.get('appearance'),outfit:form.get('outfit'),expectedReferenceId:form.get('expectedReferenceId'),expectedCardVersion:form.get('expectedCardVersion')});
+      if(!(image instanceof File) || !parsed.success)throw new HttpError(400,'Please check the image and character details.');
+      return respond(await service.uploadReference(session,id,segments[3],parsed.data,await normalizeReference(image),initial.revision));
+    }
     if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') return respond(await service.generateReference(session,id,segments[3],await body(),initial.revision));
     if (segments[2] === 'characters' && segments.length === 3 && method === 'POST') return respond(await service.addCharacter(session,id,await body(),initial.revision));
     if (segments[2] === 'characters' && segments.length === 4 && method === 'PATCH') return respond(await service.editCharacter(session,id,segments[3],await body(),initial.revision));
@@ -353,7 +370,7 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     if (method === 'POST') assertMutation(request);
     throw new HttpError(404,'Not found.');
   } catch (error) {
-    if (error instanceof HttpError) return reply({error:error.message},error.status);
+    if (error instanceof HttpError || error instanceof UploadError) return reply({error:error.message},error.status);
     if (error instanceof ApplicationError) {
       const status={invalid_input:400,not_found:404,conflict:409,invalid_story:422,invalid_provider_response:502}[error.code];
       return reply({error:error.message},status);

@@ -1,10 +1,13 @@
 import {createHash} from 'node:crypto';
 import {isPanelReady, type ComicDraft} from '../domain/comic';
-import type {Draft, Edition, PanelReview} from './contracts';
+import type {Character, Draft, Edition, PanelReview} from './contracts';
 import {canonicalJson} from './json';
 
 const canonicalDigest=(value:unknown)=>createHash('sha256').update(canonicalJson(value)!).digest('hex');
 const legacyJsonDigest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)!).digest('hex');
+export function characterCardVersion(character:Character):string {
+  return legacyJsonDigest([character.id,character.name,character.role,character.appearance,character.outfit,character.approved,character.referenceAssetId ?? null]);
+}
 export function characterUsedInStory(draft:Draft,id:string):boolean {
   return draft.pages.length>0 && (!draft.storyboard || draft.storyboard.bible.character_ids.includes(id) || draft.storyboard.pages.some(page=>page.panels.some(panel=>panel.character_ids.includes(id))));
 }
@@ -122,7 +125,7 @@ export function view(draft: Draft, published: Edition | null, revision: number) 
   return {
     id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId, revision, storyRevision:draft.storyRevision,
     panelsPerPage:draft.panelsPerPage ?? 3, pageLayout:draft.pageLayout ?? 'stack',
-    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,lockedByStory:characterUsedInStory(draft,character.id),referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:isNarrativeAccepted(draft)} : null,
+    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,lockedByStory:characterUsedInStory(draft,character.id),referenceVersion:referenceAssetId ?? null,cardVersion:characterCardVersion({...character,referenceAssetId}),referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:isNarrativeAccepted(draft)} : null,
     storyboard:draft.storyboard ?? null, storyApproval:fingerprint ? {storyRevision:draft.storyRevision,fingerprint,approved} : null,
     pendingRevision:revisionDecision, pendingArtworkDecision:artworkDecision, nextSteps, nextActions:[...new Set(nextSteps.map(step => step.action))],
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1, generationPending:draft.pageOperations?.[page.id]?.storyRevision === draft.storyRevision,

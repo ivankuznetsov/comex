@@ -206,6 +206,10 @@ export class LocalStore {
   update(id: string, owner: string, revision: number, data: unknown): boolean {
     return Number(this.db.prepare('UPDATE comics SET draft=?,revision=revision+1 WHERE id=? AND owner=? AND revision=?').run(JSON.stringify(data), id, owner, revision).changes) === 1;
   }
+  updateWithoutActivePageJob(id:string,owner:string,revision:number,data:unknown):boolean {
+    return Number(this.db.prepare(`UPDATE comics SET draft=?,revision=revision+1 WHERE id=? AND owner=? AND revision=?
+      AND NOT EXISTS(SELECT 1 FROM page_jobs WHERE comic_id=comics.id AND state IN ('running','unknown'))`).run(JSON.stringify(data),id,owner,revision).changes)===1;
+  }
   /** Reviews are version-keyed metadata and never alter the creator's draft revision. */
   putAdvisoryReview(id:string, owner:string, key:string, result:unknown): boolean {
     return Number(this.db.prepare(`INSERT INTO advisory_reviews(comic_id,review_key,result)

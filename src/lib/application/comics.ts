@@ -5,8 +5,8 @@ import {BudgetError} from '../budget';
 import stylePresets from '../../../prompts/styles.json';
 import { displayDialogueLines } from '../lettering';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel as acceptPanelInDomain, reviseStory, publishComic, isPanelReady } from '../domain/comic';
-import { ApplicationError, parse, pageIntentMatches, short, createSchema, patchSchema, characterSchema, panelVersionSchema, publishSchema, type Actor, type Character, type ComicDependencies, type ComicRepository, type Draft, type Edition, type PanelReview, type Json } from './contracts';
-import { characterUsedInStory, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view as projectView } from './views';
+import { ApplicationError, parse, pageIntentMatches, short, createSchema, patchSchema, characterSchema, referenceUploadSchema, panelVersionSchema, publishSchema, type Actor, type Character, type ComicDependencies, type ComicRepository, type Draft, type Edition, type PanelReview, type Json } from './contracts';
+import { characterCardVersion, characterUsedInStory, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view as projectView } from './views';
 import {sameJson} from './json';
 import {styles as comicStyles} from '../styles';
 type StoryPanel = Storyboard['pages'][number]['panels'][number];
@@ -1028,6 +1028,30 @@ export function createComicService(deps: ComicDependencies) {
             throw error;
         }
     }
+    async function uploadReference(session:Actor,id:string,itemId:string,payload:unknown,bytes:Buffer,expectedRevision?:number) {
+        const body=parse(payload,referenceUploadSchema);
+        const {data,revision}=await owned(session,id,expectedRevision);
+        const character=data.characters.find(c=>c.id===itemId);
+        if(!character)throw new ApplicationError('not_found','Character not found.');
+        if(characterUsedInStory(data,itemId))throw new ApplicationError('conflict','This character is already in the story. Changing their reference requires revising the story.');
+        if(data.operations?.[`character:${itemId}`])throw new ApplicationError('conflict','This image request is already running or has an unknown outcome.');
+        if(body.expectedReferenceId!==(character.referenceAssetId ?? '') || body.expectedCardVersion!==characterCardVersion(character))
+            throw new ApplicationError('conflict','The character card or reference changed. Review it before trying again.');
+        const assetId=await saveAsset(bytes);
+        const characters=data.characters.map(c=>c.id===itemId?{...c,appearance:body.appearance,outfit:body.outfit,approved:false,referenceAssetId:assetId,referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`}:c);
+        const updated={...data,characters};
+        try {
+            const saved=store.updateWithoutActivePageJob ? await store.updateWithoutActivePageJob(id,session,revision,updated) : await store.update(id,session,revision,updated);
+            if(!saved)throw new ApplicationError('conflict','This draft changed or a page is being drawn. Refresh and try again.');
+        } catch(error) {
+            try {
+                const latest=await store.getOwned<Draft>(id,session);
+                if(latest && !latest.data.characters.some(c=>c.referenceAssetId===assetId) && !latest.data.pages.some(page=>page.panels.some(p=>p.assetId===assetId)))await discardAsset(assetId);
+            } catch { /* Preserve the asset if attachment cannot be ruled out. */ }
+            throw error;
+        }
+        return {comic:view(updated,await store.getPublished<Edition>(id),revision+1)};
+    }
     async function addCharacter(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
         const body = parse(payload, characterSchema);
@@ -1311,5 +1335,5 @@ export function createComicService(deps: ComicDependencies) {
             throw new ApplicationError('conflict', 'Draft changed while withdrawing; refresh and try again.');
         return ({ comic: view(data, null, revision + 1) });
     }
-    return { listStyles, create, list, get, getAsset, listPublished, getPublished, getPublishedAsset, update, initialQuestions, refreshQuestions, suggestCharacters, acceptStoryReview, approveStory, planStory, generateReference, addCharacter, editCharacter: (actor: Actor, id: string, characterId: string, input: unknown, expectedRevision?: number) => changeCharacter(actor, id, characterId, input, 'PATCH', expectedRevision), removeCharacter: (actor: Actor, id: string, characterId: string, input: unknown = {}, expectedRevision?: number) => changeCharacter(actor, id, characterId, input, 'DELETE', expectedRevision), approveCharacter, previewRevision, applyRevision, downloadPage, generatePage, editPanel, acceptPanel, publish, withdraw };
+    return { listStyles, create, list, get, getAsset, listPublished, getPublished, getPublishedAsset, update, initialQuestions, refreshQuestions, suggestCharacters, acceptStoryReview, approveStory, planStory, generateReference, uploadReference, addCharacter, editCharacter: (actor: Actor, id: string, characterId: string, input: unknown, expectedRevision?: number) => changeCharacter(actor, id, characterId, input, 'PATCH', expectedRevision), removeCharacter: (actor: Actor, id: string, characterId: string, input: unknown = {}, expectedRevision?: number) => changeCharacter(actor, id, characterId, input, 'DELETE', expectedRevision), approveCharacter, previewRevision, applyRevision, downloadPage, generatePage, editPanel, acceptPanel, publish, withdraw };
 }

@@ -34,6 +34,7 @@ export interface ComicRepository {
   getOwned<T = unknown>(id:string, owner:Actor): MaybePromise<{revision:number;data:T} | null>;
   listOwned<T = unknown>(owner:Actor): MaybePromise<T[]>;
   update(id:string, owner:Actor, revision:number, data:unknown): MaybePromise<boolean>;
+  updateWithoutActivePageJob?(id:string, owner:Actor, revision:number, data:unknown): MaybePromise<boolean>;
   reserveTextOperation(id:string, owner:Actor, revision:number): MaybePromise<boolean>;
   finishTextOperation(id:string, owner:Actor, unknown:boolean): MaybePromise<void>;
   /** Reacquire only this operation's reconciled unknown reservation. */
@@ -75,5 +76,6 @@ export const short = z.string().trim().min(1).max(300);
 export const createSchema = z.object({title: short, plot: z.string().trim().min(1).max(4000), style: styles, email:z.string().trim().email().max(254).optional()}).strict();
 export const patchSchema = z.object({title: short.optional(), plot: z.string().trim().min(1).max(4000).optional(), style: styles.optional(), answers: z.record(z.string().max(100), z.string().max(1000)).optional(), panelsPerPage:z.number().int().min(2).max(4).optional(), pageLayout:z.enum(['stack','grid']).optional()}).strict();
 export const characterSchema = z.object({name: short, role: short, appearance: z.string().trim().min(1).max(1000), outfit: z.string().trim().min(1).max(1000)}).strict();
+export const referenceUploadSchema = characterSchema.pick({appearance:true,outfit:true}).extend({expectedReferenceId:z.string().max(100),expectedCardVersion:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
 export const panelVersionSchema = z.object({assetId:z.string().uuid(),storyRevision:z.number().int().positive(),panelRevision:z.number().int().positive()}).strict();
 export const publishSchema = z.object({title: short, creator: z.string().trim().max(100), expectedEditionId:short.nullable().optional()}).strict();

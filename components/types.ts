@@ -5,7 +5,7 @@ export const styles=sharedStyles.map(style=>({...style,image:`/styles/${style.id
 export type {ComicStyle} from '../src/lib/styles';
 export type PublicComic = { id: string; title: string; creator: string; pageCount: number; coverUrl?: string | null };
 export type PublicEdition = { id: string; title: string; creator: string; editionId: string; pages: {id: string; imageUrl: string}[] };
-export type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string | null; referenceVersion?: string | null; referenceStatus?: 'ready' | 'missing' | 'running' | 'unknown_outcome'; approved: boolean; lockedByStory?:boolean};
+export type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string | null; referenceVersion?: string | null; cardVersion?:string; referenceStatus?: 'ready' | 'missing' | 'running' | 'unknown_outcome'; approved: boolean; lockedByStory?:boolean};
 export type CharacterSuggestion = {id:string; name:string; role:string; appearance:string; outfit:string};
 export type Question = {id: string; question: string; suggestedAnswer?: string};
 export type ReviewFinding = {severity: string; dimension: string; expected: string; observed: string};
