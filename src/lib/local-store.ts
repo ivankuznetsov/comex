@@ -67,6 +67,21 @@ export class LocalStore {
       AND NOT EXISTS(SELECT 1 FROM auth_users u WHERE u.owner=c.owner)
       AND NOT EXISTS(SELECT 1 FROM auth_guests g WHERE g.owner=c.owner) LIMIT 1`).get(owner);
   }
+  /** Called inside the same write transaction as the draft and grant transfer. */
+  private transferOperations(source:string,destination:string):void {
+    if(source===destination)return;
+    const tables=this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('operations','operation_dispatch_intents','operation_steps','operation_checkpoints')").all() as {name:string}[];
+    if(tables.length===0)return; // Databases created before U5 have no operation history.
+    if(tables.length!==4)throw new Error('Operation history is incomplete; the claim cannot continue.');
+    const active=this.db.prepare(`SELECT 1 FROM operations o WHERE o.owner=? AND (o.status IN ('queued','running','unknown_outcome') OR
+      EXISTS(SELECT 1 FROM operation_steps s LEFT JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND (s.state IN ('running','unknown') OR r.id IS NULL OR r.state IN ('running','unknown')))) LIMIT 1`).get(source);
+    if(active)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
+    const invalidGrant=this.db.prepare(`SELECT 1 FROM operations o LEFT JOIN mcp_grants g ON g.id=o.grant_id WHERE o.owner=? AND o.grant_id IS NOT NULL AND (g.id IS NULL OR g.owner<>o.owner) LIMIT 1`).get(source);
+    if(invalidGrant)throw new ClaimInProgressError('A saved operation references another connection; the drafts were not moved.');
+    const collision=this.db.prepare(`SELECT 1 FROM operations s JOIN operations d ON d.owner=? AND d.action=s.action AND d.request_key=s.request_key WHERE s.owner=? LIMIT 1`).get(destination,source);
+    if(collision)throw new ClaimInProgressError('A saved operation uses the same request key in both workspaces; the drafts were not moved.');
+    this.db.prepare('UPDATE operations SET owner=? WHERE owner=?').run(destination,source);
+  }
   /** Convert a proven legacy cookie capability into a separate stable owner. */
   claimLegacyOwner(token:string,email:string,now=Date.now()): {owner:string;email:string} | null {
     this.db.exec('BEGIN IMMEDIATE');
@@ -79,6 +94,7 @@ export class LocalStore {
         EXISTS(SELECT 1 FROM json_each(c.draft,'$.pages') p, json_each(p.value,'$.panels') n WHERE json_extract(n.value,'$.status')='checking')) LIMIT 1`).get(token);
       if(active)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
       const owner=randomBytes(32).toString('hex');
+      this.transferOperations(token,owner);
       this.db.prepare('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES (?,?,?,?)').run(hash(token),owner,email,now+GUEST_TTL_MS);
       this.db.prepare(`UPDATE comics SET owner=?,draft=json_set(draft,'$.ownerId',?), edition=CASE WHEN edition IS NOT NULL AND json_extract(edition,'$.sourceRevision')=revision THEN json_set(edition,'$.sourceRevision',revision+1) ELSE edition END,revision=revision+1 WHERE owner=?`).run(owner,owner,token);
       this.db.prepare('UPDATE comic_text_operations SET owner=? WHERE owner=?').run(owner,token);
@@ -142,6 +158,7 @@ export class LocalStore {
           EXISTS(SELECT 1 FROM json_each(c.draft,'$.pages') p, json_each(p.value,'$.panels') n WHERE json_extract(n.value,'$.status')='checking')
         ) LIMIT 1`).get(anonymousOwner);
         if (active) throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try signing in again.');
+        this.transferOperations(anonymousOwner,owner);
         this.db.prepare(`UPDATE comics SET owner=?,draft=json_set(draft,'$.ownerId',?), edition=CASE WHEN edition IS NOT NULL AND json_extract(edition,'$.sourceRevision')=revision THEN json_set(edition,'$.sourceRevision',revision+1) ELSE edition END,revision=revision+1 WHERE owner=?`).run(owner,owner,anonymousOwner);
         this.db.prepare('UPDATE comic_text_operations SET owner=? WHERE owner=?').run(owner,anonymousOwner);
         this.db.prepare('UPDATE mcp_grants SET owner=? WHERE owner=?').run(owner,anonymousOwner);

@@ -12,6 +12,22 @@ export class PostgresAuth {
     try {await c.query('BEGIN');await c.query('SELECT id FROM auth_guard WHERE id=1 FOR UPDATE');const result=await fn(c);await c.query('COMMIT');return result;}
     catch(error) {await c.query('ROLLBACK').catch(()=>{});throw error;} finally {c.release();}
   }
+  /** The caller has locked the source comics and holds the auth transaction. */
+  private async transferOperations(c:PoolClient,source:string,destination:string):Promise<void> {
+    if(source===destination)return;
+    const active=await c.query(`SELECT 1 FROM operations o WHERE o.owner=$1 AND (o.status IN ('queued','running','unknown_outcome') OR
+      EXISTS(SELECT 1 FROM operation_steps s LEFT JOIN provider_reservations r ON r.id=s.reservation_id WHERE s.operation_id=o.id AND (s.state IN ('running','unknown') OR r.id IS NULL OR r.state IN ('running','unknown')))) LIMIT 1`,[source]);
+    if(active.rowCount)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
+    // Once a target row is locked, authorized starts lock that same row before
+    // insertion. Lock the existing terminal rows before changing ownership.
+    await c.query('SELECT id FROM operations WHERE owner=$1 FOR UPDATE',[source]);
+    const invalidGrant=await c.query(`SELECT 1 FROM operations o LEFT JOIN mcp_grants g ON g.id=o.grant_id WHERE o.owner=$1 AND o.grant_id IS NOT NULL AND (g.id IS NULL OR g.owner<>o.owner) LIMIT 1`,[source]);
+    if(invalidGrant.rowCount)throw new ClaimInProgressError('A saved operation references another connection; the drafts were not moved.');
+    const collision=await c.query(`SELECT 1 FROM operations s JOIN operations d ON d.owner=$2 AND d.action=s.action AND d.request_key=s.request_key WHERE s.owner=$1 LIMIT 1`,[source,destination]);
+    if(collision.rowCount)throw new ClaimInProgressError('A saved operation uses the same request key in both workspaces; the drafts were not moved.');
+    try {await c.query('UPDATE operations SET owner=$1 WHERE owner=$2',[destination,source]);}
+    catch(error){if((error as {code?:string}).code==='23505')throw new ClaimInProgressError('A saved operation uses the same request key in both workspaces; the drafts were not moved.');throw error;}
+  }
   async createGuest(email:string,now=Date.now()):Promise<{token:string;owner:string}> {
     const token=randomBytes(32).toString('hex'),owner=randomBytes(32).toString('hex');
     await this.pool.query('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES ($1,$2,$3,$4)',[hash(token),owner,email,now+ttl]);return {token,owner};
@@ -31,6 +47,7 @@ export class PostgresAuth {
         EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.draft->'pages')='array' THEN c.draft->'pages' ELSE '[]'::jsonb END) p,jsonb_array_elements(CASE WHEN jsonb_typeof(p->'panels')='array' THEN p->'panels' ELSE '[]'::jsonb END) n WHERE n->>'status'='checking')) LIMIT 1`,[token]);
       if(active.rowCount)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try again.');
       const owner=randomBytes(32).toString('hex');
+      await this.transferOperations(c,token,owner);
       await c.query('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES ($1,$2,$3,$4)',[hash(token),owner,email,now+ttl]);
       await c.query(`UPDATE comics SET owner=$1,draft=jsonb_set(draft,'{ownerId}',to_jsonb($1::text),true),edition=CASE WHEN edition IS NOT NULL AND edition->>'sourceRevision'=revision::text THEN jsonb_set(edition,'{sourceRevision}',to_jsonb(revision+1),true) ELSE edition END,revision=revision+1 WHERE owner=$2 AND import_batch_id IS NULL`,[owner,token]);
       await c.query('UPDATE comic_text_operations SET owner=$1 WHERE owner=$2 AND comic_id IN (SELECT id FROM comics WHERE owner=$1 AND import_batch_id IS NULL)',[owner,token]);
@@ -76,6 +93,7 @@ export class PostgresAuth {
             jsonb_array_elements(CASE WHEN jsonb_typeof(p->'panels')='array' THEN p->'panels' ELSE '[]'::jsonb END) n WHERE n->>'status'='checking')
         ) LIMIT 1`,[anonymousOwner]);
         if(active.rowCount)throw new ClaimInProgressError('Wait for your existing draft generation to finish, then try signing in again.');
+        await this.transferOperations(c,anonymousOwner,owner);
         await c.query(`UPDATE comics SET owner=$1,draft=jsonb_set(draft,'{ownerId}',to_jsonb($1::text),true),
           edition=CASE WHEN edition IS NOT NULL AND edition->>'sourceRevision'=revision::text THEN jsonb_set(edition,'{sourceRevision}',to_jsonb(revision+1),true) ELSE edition END,revision=revision+1
           WHERE owner=$2 AND import_batch_id IS NULL`,[owner,anonymousOwner]);
