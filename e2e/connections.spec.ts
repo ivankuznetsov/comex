@@ -65,9 +65,15 @@ test('browser consent, owner binding and one-connection revocation',async({brows
   const database=new DatabaseSync(path);const owners=database.prepare('SELECT owner FROM mcp_grants WHERE client_id IN (?,?)').all(first.client,second.client) as {owner:string}[];
   expect(owners).toHaveLength(2);expect(owners.every(row=>row.owner===guest.owner)).toBe(true);
   await page.setViewportSize({width:375,height:812});
-  await page.goto(base+'/connections');await expect(page.getByText('First client')).toBeVisible({timeout:20000});await expect(page.getByText('Second client')).toBeVisible({timeout:20000});
-  await page.getByRole('listitem').filter({hasText:'First client'}).getByRole('button',{name:'Disconnect'}).click();
-  await expect(page.getByText('First client')).toHaveCount(0);await expect(page.getByText('Second client')).toBeVisible();
+  await page.goto(base+'/connections');
+  await expect(page).toHaveURL(base+'/#connect-agent');
+  await expect(page.getByRole('button',{name:'Copy prompt'})).toBeVisible();
+  // Revocation remains an auth capability, not a user-facing management screen.
+  const connections=await page.request.get(base+'/api/mcp-auth/comex/connections');
+  const firstGrant=(await connections.json()).connections.find((item:{name:string})=>item.name==='First client');
+  expect(firstGrant).toBeTruthy();
+  const revoked=await page.request.post(base+'/api/mcp-auth/comex/connections',{headers:{origin:base},data:{id:firstGrant.id}});
+  expect(revoked.ok()).toBe(true);
   const refresh=async(client:string,token:string)=>request.post(base+'/api/mcp-auth/oauth2/token',{form:{grant_type:'refresh_token',client_id:client,refresh_token:token,resource}});
   expect((await refresh(first.client,first.tokens.refresh_token)).ok()).toBe(false);expect((await refresh(second.client,second.tokens.refresh_token)).ok()).toBe(true);
   const browserSession=await page.request.get(base+'/api/auth/session');expect((await browserSession.json()).guest.email).toBe('browser@example.test');

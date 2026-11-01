@@ -1,5 +1,7 @@
 # Connect Comex to an assistant
 
+On the Comex home page, click **Copy prompt** under **Connect your agent** and paste it into your assistant. The prompt includes the MCP endpoint and setup instructions for the agent. No connection dashboard or permission settings are needed. Complete the browser sign-in when your client opens it, then describe your comic.
+
 Once Comex is deployed and its hosted storage, OAuth, and generation worker are configured, use its HTTPS `/mcp` endpoint to connect an assistant. Sign in to the Comex browser workspace containing your drafts before approving the connection. A new browser session can represent a different workspace; connecting it does not automatically transfer drafts from a local installation.
 
 ## Codex
@@ -27,8 +29,8 @@ The local editor runs reviews in the background; a hosted generation operation c
 
 Generation may continue after a conversation disconnects. Resume by checking the existing operation instead of requesting a replacement. Export is private; publishing or withdrawing an edition is a separate explicit action. The editor remains available for reviewing an image if your client cannot display it.
 
-## Connections and verification
+## Authentication and verification
 
-The connection grants selected read, write, generation, and publication capabilities. Review the requested permissions during consent. Manage or revoke an individual connection in Comex without deleting your drafts. Revoke it if the connected client should no longer have access.
+The connection grants selected read, write, generation, and publication capabilities. Review the requested permissions during consent. The app has no connection-management screen. The underlying authenticated revocation API remains available for operators and clients; removing a grant does not delete drafts. Legacy `/connections` links redirect to the home-page prompt.
 
 The [acceptance procedure](research/mcp-acceptance.md) records local tests and hosted Codex, ChatGPT, and Dot checks separately. Until the hosted checks have been performed, client availability, image display, OAuth interoperability, and restart recovery remain unverified for that deployment.
