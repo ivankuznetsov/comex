@@ -143,7 +143,9 @@ suite('operator reconciliation (Postgres)',()=>{
     for(const secret of [owner,prompt,token,f.operation.id])expect(inspection.output+resolution.output).not.toContain(secret);
     expect(await state(f.operation.id)).toMatchObject({op:{status:'queued'},steps:[{state:'failed',reservation:'completed'}],intent:{state:'pending'},counts:{used:1,active:0}});
     const lease=(await repo.claimOperation(f.operation.id,300_000))!;
-    expect(await repo.claimPaidStep(lease,{id:f.stepId,input:{prompt}},async()=>{throw new Error('must not dispatch');})).toMatchObject({kind:'failed'});
+    let policyChecks=0;
+    expect(await repo.claimPaidStep(lease,{id:f.stepId,input:{prompt}},async()=>{policyChecks++;})).toMatchObject({kind:'failed'});
+    expect(policyChecks).toBe(1);
     expect((await state(f.operation.id)).counts).toEqual({used:1,active:0});
   });
   test('refuses a still active worker and a wrong or absent unknown step',async()=>{
