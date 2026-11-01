@@ -145,7 +145,7 @@ postgresDescribe('Postgres repository and import', () => {
     expect(await b.summary()).toEqual({used:3,active:0,unknown:0});
   });
   test('simultaneous workers cannot exceed the active shared budget',async()=>{
-    await pool.query('TRUNCATE provider_reservations');
+    await pool.query('TRUNCATE provider_reservations CASCADE');
     const a=new PostgresProviderBudget(pool,{maxCalls:5,maxConcurrent:2}),b=new PostgresProviderBudget(second,{maxCalls:5,maxConcurrent:2});
     const outcomes=await Promise.allSettled(Array.from({length:12},(_,i)=>(i%2 ? a : b).reserve(`distinct:${i}`)));
     expect(outcomes.filter(x=>x.status==='fulfilled')).toHaveLength(2);
@@ -153,7 +153,7 @@ postgresDescribe('Postgres repository and import', () => {
     expect(await b.summary()).toEqual({used:2,active:2,unknown:0});
   });
   test('separate processes share the same concurrency cap',async()=>{
-    await pool.query('TRUNCATE provider_reservations');
+    await pool.query('TRUNCATE provider_reservations CASCADE');
     const children=Array.from({length:6},(_,i)=>Bun.spawn({cmd:['bun','run','tests/helpers/budget-worker.ts'],stdin:'pipe',stdout:'pipe',stderr:'pipe',env:{...process.env,TEST_SCHEMA:schema,TEST_STEP:`process:${i}`}}));
     for(const child of children) {child.stdin.write('go');child.stdin.end();}
     const outcomes=await Promise.all(children.map(async child=>{
@@ -173,7 +173,7 @@ postgresDescribe('Postgres repository and import', () => {
     expect(objects.data.size).toBe(before);
   });
   test('the hosted budgeted fetch finalizes completed and unknown outcomes without retrying',async()=>{
-    await pool.query('TRUNCATE provider_reservations');
+    await pool.query('TRUNCATE provider_reservations CASCADE');
     const budget=new PostgresProviderBudget(pool,{maxCalls:4,maxConcurrent:1}); let calls=0;
     const request=createPostgresBudgetedFetch(budget,async()=>{calls++;return new Response('{}',{status:200});});
     const response=await request('https://example.test');
@@ -186,7 +186,7 @@ postgresDescribe('Postgres repository and import', () => {
     expect(calls).toBe(2); expect(await budget.summary()).toEqual({used:2,active:1,unknown:1});
   });
   test('the shared provider waits for Postgres completed and unknown finalization',async()=>{
-    await pool.query('TRUNCATE provider_reservations');
+    await pool.query('TRUNCATE provider_reservations CASCADE');
     const budget=new PostgresProviderBudget(pool,{maxCalls:4,maxConcurrent:1});
     const valid=Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({questions:[{id:'q',question:'Where?',suggested_answer:'London'}]})}]}]});
     const service=createAIService({apiKey:'test',fetch:createPostgresBudgetedFetch(budget,async()=>valid)});
