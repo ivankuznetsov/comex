@@ -2,7 +2,7 @@
 
 Turn a story idea into a comic, with original characters, editable pages, and a public reading shelf. Comex is being built for the DevDay Exchange London Community Hackathon on 1 November 2026.
 
-The current build runs locally. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
+The local build runs in a browser. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
 
 [Watch the 43-second demo](docs/demo/comex-demo-simulated.mp4). It uses simulated AI and email providers with example artwork; it does not demonstrate live email delivery.
 
@@ -33,7 +33,9 @@ bun run build
 
 The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; drawing a reference is a separate action. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background and their findings are advisory. Creators can draw the next page or publish once the artwork is complete, without approving individual panels. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
 
-The Vercel demo can route its API through a running local gateway, so its database, images and jobs remain on that machine. This is a temporary demo arrangement, not durable serverless hosting. See [setup](docs/setup.md); hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization are not yet implemented.
+The hosted implementation adds shared drafts and a remote MCP connection for Codex, ChatGPT, and Dot. It follows the editor's questions and review choices, including explicit approval of the displayed story and images. See [assistant connections](docs/mcp.md) and [hosted setup](docs/setup.md#hosted-mcp). SQLite and local asset storage remain for local development only. Deployment, hosted storage and durable jobs have not been verified in a deployed environment; the real client connections also require separate acceptance tests.
+
+The separate Vercel demo can route its API through a running local gateway, so its database, images and jobs remain on that machine. See [setup](docs/setup.md) for that temporary arrangement.
 
 ## Credits
 

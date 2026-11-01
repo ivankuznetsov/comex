@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export type BudgetErrorCode = 'budget_not_configured' | 'budget_exhausted' | 'concurrency_limit';
+export type BudgetErrorCode = 'budget_not_configured' | 'budget_exhausted' | 'concurrency_limit' | 'reservation_exists';
 export class BudgetError extends Error {
   constructor(public readonly code: BudgetErrorCode, message: string) {
     super(message);
@@ -35,8 +35,15 @@ export class ProviderBudget {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );`);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const columns=this.db.prepare('PRAGMA table_info(provider_reservations)').all() as {name:string}[];
+      if (!columns.some(column=>column.name==='step_key')) this.db.exec('ALTER TABLE provider_reservations ADD COLUMN step_key TEXT');
+      this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS provider_reservations_step_key ON provider_reservations(step_key)');
+      this.db.exec('COMMIT');
+    } catch(error) {this.db.exec('ROLLBACK');throw error;}
   }
-  reserve(): string {
+  reserve(stepKey?:string): string {
     const {maxCalls, maxConcurrent} = this.config;
     if ((maxCalls !== 'unlimited' && (!Number.isSafeInteger(maxCalls) || (maxCalls as number) < 1)) ||
         !Number.isSafeInteger(maxConcurrent) || (maxConcurrent as number) < 1) {
@@ -44,12 +51,13 @@ export class ProviderBudget {
     }
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      if (stepKey !== undefined && this.db.prepare('SELECT 1 FROM provider_reservations WHERE step_key=?').get(stepKey)) throw new BudgetError('reservation_exists', 'This provider step already has a reservation.');
       const counts = this.summary();
       if (typeof maxCalls === 'number' && counts.used >= maxCalls) throw new BudgetError('budget_exhausted', 'The configured AI call budget is exhausted.');
       if (counts.active >= maxConcurrent!) throw new BudgetError('concurrency_limit', 'The AI concurrency limit is reached or a previous request has an unknown outcome.');
       const id = randomUUID();
       const now = new Date().toISOString();
-      this.db.prepare('INSERT INTO provider_reservations(id,state,created_at,updated_at) VALUES (?,\'running\',?,?)').run(id, now, now);
+      this.db.prepare('INSERT INTO provider_reservations(id,state,created_at,updated_at,step_key) VALUES (?,\'running\',?,?,?)').run(id, now, now, stepKey ?? null);
       this.db.exec('COMMIT');
       return id;
     } catch (error) {
@@ -80,11 +88,15 @@ export class ProviderBudget {
 }
 
 const finalizeResponse = Symbol('finalize provider reservation');
-type BudgetedResponse = Response & {[finalizeResponse]?: (state: 'completed' | 'unknown') => void};
+type BudgetedResponse = Response & {[finalizeResponse]?: (state: 'completed' | 'unknown') => void | Promise<void>};
+
+export function setBudgetFinalizer(response:Response, finalize:(state:'completed'|'unknown')=>void|Promise<void>):void {
+  Object.defineProperty(response,finalizeResponse,{value:finalize});
+}
 
 /** Called by the adapter after reading and validating the provider response. */
-export function finalizeBudgetedResponse(response: Response, state: 'completed' | 'unknown'): void {
-  (response as BudgetedResponse)[finalizeResponse]?.(state);
+export function finalizeBudgetedResponse(response: Response, state: 'completed' | 'unknown'): void | Promise<void> {
+  return (response as BudgetedResponse)[finalizeResponse]?.(state);
 }
 
 /** No automatic retries. An indeterminate response remains an outstanding reservation. */
@@ -110,9 +122,9 @@ export function createBudgetedFetch(path: string, fetcher: FetchLike = globalThi
     }
     // Keep the reservation running until the adapter consumes and checks the body.
     // If the process dies first, it remains running for manual reconciliation.
-    Object.defineProperty(response, finalizeResponse, {value: (state: 'completed' | 'unknown') => {
+    setBudgetFinalizer(response, (state: 'completed' | 'unknown') => {
       try { budget.finish(reservation, state); } finally { budget.close(); }
-    }});
+    });
     return response;
   };
 }

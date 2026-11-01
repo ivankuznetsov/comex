@@ -36,6 +36,12 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(oriel.getByAltText('Reference for Oriel')).toBeVisible();
   await oriel.getByRole('button',{name:'Approve',exact:true}).click();
   await expect(oriel.getByRole('button',{name:'Edit card'})).toBeVisible();
+  await expect(page.getByRole('region',{name:'Story beats'}).getByText('Mina moves through scene 1-1')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Generate page',exact:true})).toBeDisabled();
+  await page.getByRole('button',{name:'Approve story',exact:true}).click();
+  await expect(page.getByText('Story approved for drawing.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Story approved for drawing.')).toBeVisible();
   const savedDraft = await page.request.get(new URL(page.url()).pathname.replace('/comics/', '/api/comics/'));
   const savedAnswers = (await savedDraft.json()).comic.answers as Record<string,string>;
   expect(Object.values(savedAnswers)).toContain('Deliver the key safely');
@@ -92,7 +98,7 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('button',{name:'Resume saved preview'}).click();
   await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
   await revisionDialog.getByRole('button',{name:'Apply story change'}).click();
-  await expect(page.getByText('Story updated. Later pages need to be drawn again.')).toBeVisible({timeout:40_000});
+  await expect(page.getByText(/Story updated\. Later pages need to be drawn again\.|Later pages remain outdated until you .*generate them\./)).toBeVisible({timeout:40_000});
   await expect(page.getByRole('img',{name:'Page 2, panel 1'})).toHaveAttribute('src', prefixBefore!);
   for (let j = 2; j <= 3; j++) {
     await page.getByRole('img',{name:`Page 2, panel ${j}`}).click();

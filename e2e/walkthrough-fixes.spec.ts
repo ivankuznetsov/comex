@@ -5,7 +5,7 @@ test('mobile editor keeps panel checks advisory and errors in view', async ({pag
   await page.setViewportSize({width:390,height:844});
   let reviewFinished=false, allDrawn=false;
   const version={assetId:'11111111-1111-4111-8111-111111111111',storyRevision:1,panelRevision:2};
-  const comic=()=>({id:'ux-review',revision:1,title:'Review demo',plot:'A short story',style:'ink-manga',characters:[],questions:[],answers:{},initialQuestions:'complete',initialSuggestions:'complete',published:false,pages:[
+  const comic=()=>({id:'ux-review',revision:1,storyRevision:1,storyApproval:{storyRevision:1,fingerprint:'a'.repeat(64),approved:true},title:'Review demo',plot:'A short story',style:'ink-manga',characters:[],questions:[],answers:{},initialQuestions:'complete',initialSuggestions:'complete',published:false,pages:[
     {id:'page1',index:1,status:'current',panels:[{id:'p1',description:'The market',status:reviewFinished?'needs_review':'checking',evaluation:reviewFinished?'blocker':'pending',reviewOutcome:reviewFinished?'findings':null,findings:reviewFinished?[{severity:'blocker',dimension:'framing_composition',expected:'A silhouette',observed:'The figure is visible'}]:[],ready:true,accepted:false,imageUrl:'/test-panel.png',reviewVersion:version}]},
     {id:'page2',index:2,status:allDrawn?'current':'planned',panels:[{id:'p2',description:'The ending',status:allDrawn?'checking':'planned',evaluation:'pending',ready:allDrawn,accepted:false,imageUrl:allDrawn?'/test-panel.png':null}]},
   ]});

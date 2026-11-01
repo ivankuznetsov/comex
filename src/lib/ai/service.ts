@@ -90,13 +90,13 @@ export function createAIService(options: AIOptions = {}) {
     } catch (error) {
       // A refusal or an explicitly incomplete response is a known provider outcome.
       if (error instanceof AIError && (error.code === 'refusal' || error.message === 'The model response was incomplete.')) {
-        finalizeBudgetedResponse(response, 'completed');
+        await finalizeBudgetedResponse(response, 'completed');
         throw error;
       }
-      finalizeBudgetedResponse(response, 'unknown');
+      await finalizeBudgetedResponse(response, 'unknown');
       throw new AIError('unknown_outcome', 'The provider response was invalid or could not be read. Check the operation before retrying.');
     }
-    finalizeBudgetedResponse(response, 'completed');
+    await finalizeBudgetedResponse(response, 'completed');
     return result;
   }
   async function structured<T>(name: string, schema: z.ZodType<T>, instruction: string, payload: unknown, references?: Reference[]): Promise<T> {

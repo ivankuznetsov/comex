@@ -1,10 +1,13 @@
 import {afterEach, describe, expect, test} from 'bun:test';
-import config from '../next.config';
+import {nextConfig as config} from '../next.config';
 
 const original = process.env.COMEX_DEMO_BACKEND_URL;
+const originalRuntime = process.env.COMEX_RUNTIME;
 afterEach(() => {
   if (original === undefined) delete process.env.COMEX_DEMO_BACKEND_URL;
   else process.env.COMEX_DEMO_BACKEND_URL = original;
+  if (originalRuntime === undefined) delete process.env.COMEX_RUNTIME;
+  else process.env.COMEX_RUNTIME = originalRuntime;
 });
 
 describe('demo backend routing', () => {
@@ -26,5 +29,11 @@ describe('demo backend routing', () => {
       process.env.COMEX_DEMO_BACKEND_URL = url;
       await expect(Promise.resolve().then(() => config.rewrites!())).rejects.toThrow();
     }
+  });
+
+  test('does not route hosted operations through the demo gateway', async () => {
+    process.env.COMEX_DEMO_BACKEND_URL = 'https://example.trycloudflare.com';
+    process.env.COMEX_RUNTIME = 'hosted';
+    await expect(Promise.resolve().then(() => config.rewrites!())).rejects.toThrow();
   });
 });

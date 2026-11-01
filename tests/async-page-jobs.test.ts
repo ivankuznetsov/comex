@@ -7,6 +7,8 @@ import { NextRequest } from 'next/server';
 import sharp from 'sharp';
 import { ClaimInProgressError, LocalStore } from '@/src/lib/local-store';
 import { acceptPanel, commitPanelRender, createComic } from '@/src/lib/domain/comic';
+import {storyFingerprint} from '@/src/lib/application/views';
+import type {Draft} from '@/src/lib/application/contracts';
 import { handleApi } from '@/src/lib/local-api';
 
 type StoreGlobal = typeof globalThis & { __comexLocalStore?: LocalStore };
@@ -30,7 +32,8 @@ async function fixture() {
   const domain = createComic({ id: comicId, ownerId: owner, title: 'Async test', creatorName: '', plot: 'Deliver a key', styleId: 'ink-manga', pages: [{ id: 'page1', panels: [{ id: 'p1', beat: 'Mina delivers the key' }] }] });
   const state = { location: 'town', time: 'day', props: [], outfits: [], injuries: [], knowledge: [] };
   const storyboard = { bible: { premise: 'Deliver a key', setting: 'town', rules: [], character_ids: ['mina'] }, pages: [{ index: 1, panels: [{ id: 'p1', index: 1, character_ids: ['mina'], action: 'Mina delivers the key', framing: 'wide', dialogue: [], state_before: state, state_after: state }] }] };
-  store.create(comicId, owner, { ...domain, questions: [], answers: {}, characters: [{ id: 'mina', name: 'Mina', role: 'courier', appearance: 'hair', outfit: 'coat', approved: true, referenceAssetId: ref }], storyboard });
+  const draft:Draft={ ...domain, questions: [], answers: {}, characters: [{ id: 'mina', name: 'Mina', role: 'courier', appearance: 'hair', outfit: 'coat', approved: true, referenceAssetId: ref }], storyboard };
+  store.create(comicId, owner, {...draft,storyApproval:{storyRevision:draft.storyRevision,fingerprint:storyFingerprint(draft)!}});
   const cookie = `comex_session=${owner}`;
   const requestPage = (pageId: string, suffix: string, method = 'GET', body?: unknown, cookieValue = cookie) => {
     const path = `comics/${comicId}/pages/${pageId}/${suffix}`;
@@ -155,7 +158,8 @@ test('a different page cannot start while the preceding page is being regenerate
     const state = {location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
     const spec = (id:string) => ({id,index:1,character_ids:['mina'],action:id,framing:'wide',dialogue:[],state_before:state,state_after:state});
     const storyboard = {bible:{premise:'Deliver',setting:'town',rules:[],character_ids:['mina']},pages:[{index:1,panels:[spec('p1')]},{index:2,panels:[spec('p2')]}]};
-    expect(f.store.update(f.comicId,f.owner,original.revision,{...original.data,...domain,storyboard})).toBe(true);
+    const updated:Draft={...original.data,...domain,storyboard,storyApproval:null};
+    expect(f.store.update(f.comicId,f.owner,original.revision,{...updated,storyApproval:{storyRevision:updated.storyRevision,fingerprint:storyFingerprint(updated)!}})).toBe(true);
     globalThis.fetch = (async (url:string|URL|Request) => {
       if (String(url).includes('/images/')) {imageCalls++;started();await gate;return Response.json({data:[{b64_json:f.png.toString('base64')}]});}
       return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({outcome:'inconclusive',findings:[]})}]}]});

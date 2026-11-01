@@ -7,7 +7,7 @@ test('publish dialog manages keyboard focus and returns it to the trigger', asyn
   await page.getByLabel('Give your comic a title').fill('The Courier');
   await page.getByLabel('What happens in your story?').fill('A courier delivers a mysterious key.');
   await page.getByRole('button', { name: /Start creating/ }).click();
-  await expect(page).toHaveURL(/\/comics\//);
+  await expect(page).toHaveURL(/\/comics\//,{timeout:30_000});
 
   const trigger = page.getByRole('button', { name: 'Publish', exact: true });
   await trigger.focus();

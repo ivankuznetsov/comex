@@ -20,6 +20,8 @@ coverage/
 # Private runtime data and raw evaluation artifacts
 data/
 storage/
+!src/lib/storage/
+!src/lib/storage/*.ts
 evals/results/
 test-results/
 playwright-report/
@@ -27,3 +29,4 @@ playwright-report/
 *.sqlite-*
 *.db
 *.log
+/.swc
