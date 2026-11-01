@@ -5,6 +5,7 @@ import {Pool} from 'pg';
 import {createHostedBackend} from '../src/lib/hosted-api';
 import {handleApi} from '../src/lib/local-api';
 import {createMcpReads} from '../src/lib/mcp/reads';
+import {browserOwnerMatches} from '../src/lib/auth/browser-transaction';
 import type {PrivateObjects} from '../src/lib/storage/assets';
 import {applyMigrations} from '../src/lib/storage/postgres';
 
@@ -57,5 +58,26 @@ postgres('hosted browser adapter',()=>{
     const options={pool,objects:new MemoryObjects(),budgetFetch:async()=>new Response()};
     expect(()=>createHostedBackend({...options,origin:'https://comex.example/path'})).toThrow();
     expect(()=>createHostedBackend({...options,origin:'http://comex.example'})).toThrow();
+  });
+  test('a hosted guest session can be confirmed before starting a durable create',async()=>{
+    const backend=createHostedBackend({pool,objects:new MemoryObjects(),origin:'https://comex.example',budgetFetch:async()=>{throw new Error('not allowed');}});
+    const guest=(cookie?:string)=>new NextRequest('https://comex.example/api/auth/guest',{method:'POST',headers:{host:'comex.example',origin:'https://comex.example','content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify({email:'new@example.test'})});
+    const first=await handleApi(guest(),['auth','guest'],backend);
+    const cookie=first.headers.get('set-cookie')!.split(';')[0];
+    expect(first.status).toBe(200);
+    const repeated=await handleApi(guest(cookie),['auth','guest'],backend);
+    expect(repeated.status).toBe(200);
+    expect(repeated.headers.get('set-cookie')).toBeNull();
+    const owner=await backend.auth.guestIdentity(cookie.slice('comex_session='.length));
+    expect(owner).not.toBeNull();
+    const client=await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT id FROM auth_guard WHERE id=1 FOR UPDATE');
+      expect(await browserOwnerMatches(client,cookie,owner!.owner)).toBe(true);
+      expect(await browserOwnerMatches(client,cookie,'another-owner')).toBe(false);
+      expect(await browserOwnerMatches(client,'comex_session=forged',owner!.owner)).toBe(false);
+      await client.query('ROLLBACK');
+    } finally {client.release();}
   });
 });

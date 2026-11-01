@@ -105,6 +105,15 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
       // Require Origin for these endpoints; never derive an email link from the Host header.
       const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
       if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+      if (backend && segments.length === 2 && segments[1] === 'guest' && method === 'POST') {
+        const {email:rawEmail}=await input(request,z.object({email:z.string().trim().email().max(254)}).strict());
+        if (await owner(request,store)) return reply({ok:true});
+        const at=rawEmail.lastIndexOf('@');
+        const guest=await store.createGuest(`${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}`);
+        const response=reply({ok:true});
+        response.cookies.set('comex_session',guest.token,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
+        return response;
+      }
       if (segments.length === 2 && segments[1] === 'request' && method === 'POST') {
         const {email: rawEmail,claimGuest} = await input(request, z.object({email:z.string().trim().email().max(254),claimGuest:z.boolean().optional()}).strict());
         const at = rawEmail.lastIndexOf('@');
