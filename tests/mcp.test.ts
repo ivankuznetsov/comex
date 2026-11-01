@@ -20,6 +20,7 @@ function fixture() {
       async getAsset(identity,comicId){if(identity!==alice || comicId!=='comic') throw {code:'not_found'};return {bytes:png,mimeType:'image/png'};},
       async getExport(identity,operationId){if(identity!==alice || operationId!=='export')throw {code:'not_found'};return {bytes:png,mimeType:'image/png'};},
       async getOperation(identity,operationId){if(identity!==alice) throw {code:'not_found'};return {id:operationId,status:'queued',ownerId:identity.actor,grantId:'grant-secret'};},
+      async listOperations(identity){return {operations:identity===alice?[{id:'pending',status:'running',action:'generatePage'}]:[]};},
     },
     operations:{kind:'durable',async enqueue(input){calls.push(input);return {id:`op-${calls.length}`,status:'queued',...(input.comicId?{comicId:input.comicId}:{})};}},
   };
@@ -56,7 +57,7 @@ describe('MCP HTTP boundary',()=>{
       expect(tools.map(tool=>tool.name)).toContain('comex_accept_story_review');
       expect(tools.find(tool=>tool.name==='comex_update_comic')?.inputSchema.additionalProperties).toBe(false);
       expect(tools.find(tool=>tool.name==='comex_generate_page')?.annotations?.openWorldHint).toBe(true);
-      const reads=new Set(['comex_list_styles','comex_list_comics','comex_get_comic','comex_get_asset','comex_get_export','comex_get_operation']);
+      const reads=new Set(['comex_list_styles','comex_list_comics','comex_get_comic','comex_get_asset','comex_get_export','comex_get_operation','comex_list_operations']);
       for (const tool of tools.filter(tool=>!reads.has(tool.name))) {
         expect(tool.inputSchema.additionalProperties).toBe(false);
         expect(tool.inputSchema.required).toContain('requestKey');
@@ -145,6 +146,8 @@ describe('MCP HTTP boundary',()=>{
       expect(resultSchema.safeParse(image.structuredContent).success).toBe(true);
       const exported=await client.callTool({name:'comex_get_export',arguments:{operationId:'export'}});
       expect(exported.content.some(block=>block.type==='image' && block.mimeType==='image/png')).toBe(true);
+      const operations=await client.callTool({name:'comex_list_operations',arguments:{comicId:'comic'}});
+      expect((operations.structuredContent as any).data.operations[0]).toMatchObject({id:'pending',status:'running'});
       const invalid=await client.callTool({name:'comex_generate_page',arguments:{comicId:'comic',pageId:'page',expectedRevision:3,requestKey:'key',intent:'generate',ownerId:'other'}});
       expect(invalid.isError).toBe(true);
       expect(calls).toHaveLength(0);

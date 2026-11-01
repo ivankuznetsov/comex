@@ -17,7 +17,7 @@ export type IdentityStore = {
   createGuest(email:string):{token:string;owner:string}|Promise<{token:string;owner:string}>;
   claimLegacyOwner(token:string,email:string):{owner:string;email:string}|null|Promise<{owner:string;email:string}|null>;
 };
-type Options = {baseURL:string;resource:string;secret:string;database:AuthDatabase;identityStore:IdentityStore};
+type Options = {baseURL:string;resource:string;secret:string;database:AuthDatabase;identityStore:IdentityStore;trustedOrigins?:readonly string[]};
 const cookieValue=(header:string,name:string)=>header.split(';').map(v=>v.trim()).find(v=>v.startsWith(`${name}=`))?.slice(name.length+1);
 const tokenPattern=/^[a-f0-9]{64}$/;
 
@@ -33,11 +33,11 @@ export async function browserOwner(cookie:string,store:IdentityStore):Promise<{o
 }
 
 /** OAuth server and the only bearer-to-owner boundary for MCP transports. */
-export function createMcpAuth({baseURL,resource,secret,database,identityStore}:Options) {
+export function createMcpAuth({baseURL,resource,secret,database,identityStore,trustedOrigins=[]}:Options) {
   const origin=new URL(baseURL).origin, issuer=origin+'/api/mcp-auth';
   if(baseURL!==origin || secret.length<32 || resource!==origin+'/mcp')throw new Error('Invalid MCP authentication configuration.');
   if(new URL(origin).protocol!=='https:' && !['localhost','127.0.0.1','[::1]'].includes(new URL(origin).hostname))throw new Error('MCP authentication requires HTTPS.');
-  const options={baseURL:origin,basePath:'/api/mcp-auth',secret,database,session:{expiresIn:30*24*60*60},logger:{disabled:true},plugins:[
+  const options={baseURL:origin,basePath:'/api/mcp-auth',secret,database,trustedOrigins:[...trustedOrigins],session:{expiresIn:30*24*60*60},logger:{disabled:true},plugins:[
     anonymous({disableDeleteAnonymousUser:true}),
     jwt({jwt:{issuer,audience:resource}}),
     mcp({loginPage:'/connect',consentPage:'/connect/consent',resource,scopes:[...COMEX_SCOPES,'offline_access'],allowDynamicClientRegistration:true,allowUnauthenticatedClientRegistration:true,allowPublicClientPrelogin:true,refreshTokenReuseInterval:0,dpop:{signingAlgorithms:[]}}),

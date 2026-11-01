@@ -2,7 +2,7 @@
 
 Turn a story idea into a comic, with original characters, editable pages, and a public reading shelf. Comex is being built for the DevDay Exchange London Community Hackathon on 1 November 2026.
 
-The current build runs locally. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
+The local build runs in a browser. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
 
 ## Local setup
 
@@ -29,7 +29,7 @@ bun run build
 
 The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; selecting and adding a card starts its reference image. Questions, suggestions, and images each use provider calls. Suggested character prompts have mock coverage but have not yet been validated against a live provider. Some generation and edit paths may remain incomplete; consult the verification results before relying on them. LLM findings are advisory until calibrated against real examples. Forking comics is future scope.
 
-SQLite and local asset storage are for local development only. Deployment, hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization remain unverified. No production deployment has been made.
+The hosted implementation adds shared drafts and a remote MCP connection for Codex, ChatGPT, and Dot. It follows the editor's questions and review choices, including explicit approval of the displayed story and images. See [assistant connections](docs/mcp.md) and [hosted setup](docs/setup.md#hosted-mcp). SQLite and local asset storage remain for local development only. Deployment, hosted storage and durable jobs have not been verified in a deployed environment; the real client connections also require separate acceptance tests.
 
 ## Credits
 

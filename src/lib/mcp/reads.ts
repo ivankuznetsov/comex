@@ -3,9 +3,10 @@ import type {Pool} from 'pg';
 import type {createComicService} from '../application/comics';
 import {ApplicationError} from '../application/contracts';
 import type {Operation, MaybePromise} from '../operations/contracts';
+import {operationSummary} from '../operations/projection';
 import type {McpReads} from './contracts';
 
-type OperationReader = {getOwned(owner:string,id:string):MaybePromise<Operation|null>};
+type OperationReader = {getOwned(owner:string,id:string):MaybePromise<Operation|null>;listActiveOwned(owner:string,targetId?:string):MaybePromise<unknown[]>};
 type ListingRow = {id:string;draft:unknown;published:boolean | number};
 
 /** Read projections are bounded and always filtered by the authenticated owner. */
@@ -32,7 +33,8 @@ export function createMcpReads(database:DatabaseSync | Pool, service:ReturnType<
     async getOperation(identity,id) {
       const operation=await operations.getOwned(identity.actor,id);
       if (!operation) throw new ApplicationError('not_found','Operation not found.');
-      return {id:operation.id,status:operation.status,action:operation.action,comicId:operation.targetId || undefined,result:operation.result};
+      return {...operationSummary(operation),result:operation.result};
     },
+    async listOperations(identity,id) {return {operations:await operations.listActiveOwned(identity.actor,id)};},
   };
 }

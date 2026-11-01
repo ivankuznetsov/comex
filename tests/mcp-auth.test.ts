@@ -9,15 +9,16 @@ import {fetchClientMetadataResource} from '@better-auth/cimd/node';
 import {validateClientIdUrl} from '@better-auth/cimd';
 import {LocalStore} from '../src/lib/local-store';
 import {createMcpAuth} from '../src/lib/auth/mcp';
+import {mcpAllowedOrigins,withMcpCors} from '../src/lib/auth/cors';
 
 const base='http://localhost:3127', resource=base+'/mcp', secret='test-only-secret-test-only-secret-test-only-secret';
 const paths:string[]=[];
 afterEach(()=>{for(const path of paths.splice(0))rmSync(path,{recursive:true,force:true});});
 
-async function fixture() {
+async function fixture(trustedOrigins:string[]=[]) {
   const dir=mkdtempSync(join(tmpdir(),'comex-oauth-'));paths.push(dir);
   const path=join(dir,'auth.sqlite'), store=new LocalStore(path), database=new DatabaseSync(path);
-  const server=createMcpAuth({baseURL:base,resource,secret,database,identityStore:store});
+  const server=createMcpAuth({baseURL:base,resource,secret,database,identityStore:store,trustedOrigins});
   await (await getMigrations(server.options)).runMigrations();
   const call=(path:string, init:RequestInit={})=>server.auth.handler(new Request(base+'/api/mcp-auth'+path,init));
   const guest=store.createGuest('creator@example.test');
@@ -51,6 +52,28 @@ async function fixture() {
 }
 
 describe('browser-owned OAuth connections',()=>{
+  test('allowed browser origins can discover, register and exchange a PKCE code while other origins are denied',async()=>{
+    const clientOrigin='https://client.example',origins=mcpAllowedOrigins(base,clientOrigin),f=await fixture(origins);
+    const send=(request:Request,methods:string[])=>withMcpCors(request,origins,methods,()=>f.server.auth.handler(request));
+    try {
+      const metadata=await send(new Request(base+'/.well-known/oauth-protected-resource/mcp',{headers:{origin:clientOrigin}}),['GET']);
+      expect(metadata.status).toBe(200);expect(metadata.headers.get('access-control-allow-origin')).toBe(clientOrigin);
+      const preflight=await send(new Request(base+'/api/mcp-auth/oauth2/register',{method:'OPTIONS',headers:{origin:clientOrigin,'access-control-request-method':'POST','access-control-request-headers':'content-type'}}),['POST']);
+      expect(preflight.status).toBe(204);expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+      const registration=await send(new Request(base+'/api/mcp-auth/oauth2/register',{method:'POST',headers:{origin:clientOrigin,'content-type':'application/json'},body:JSON.stringify({application_type:'native',client_name:'Browser client',redirect_uris:['http://127.0.0.1:64321/callback'],token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']})}),['POST']);
+      expect(registration.status).toBe(201);expect(registration.headers.get('access-control-allow-origin')).toBe(clientOrigin);
+      const client=(await registration.json()).client_id as string,pending=await f.authorize(client),approved=await f.approve(pending.query);
+      const code=new URL((await approved.json()).redirect).searchParams.get('code')!;
+      const token=await send(new Request(base+'/api/mcp-auth/oauth2/token',{method:'POST',headers:{origin:clientOrigin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client,code,redirect_uri:'http://127.0.0.1:64321/callback',code_verifier:pending.verifier,resource})}),['POST']);
+      expect(token.status).toBe(200);expect(token.headers.get('access-control-allow-origin')).toBe(clientOrigin);
+      const denied=await send(new Request(base+'/.well-known/oauth-protected-resource/mcp',{headers:{origin:'https://untrusted.example'}}),['GET']);
+      expect(denied.status).toBe(403);expect(denied.headers.get('access-control-allow-origin')).toBeNull();
+      const challenge=await withMcpCors(new Request(resource,{headers:{origin:clientOrigin}}),origins,['POST'],async()=>new Response(null,{status:401,headers:{'WWW-Authenticate':'Bearer resource_metadata="https://comex.example/metadata"'}}));
+      expect(challenge.headers.get('access-control-expose-headers')).toContain('WWW-Authenticate');
+      const redirect=await withMcpCors(new Request(resource,{headers:{origin:clientOrigin}}),origins,['GET'],async()=>Response.redirect('https://client.example/callback'));
+      expect(redirect.status).toBe(302);expect(redirect.headers.get('access-control-allow-origin')).toBe(clientOrigin);
+    } finally {f.database.close();f.store.close();}
+  });
   test('a fresh browser grant belongs to a new empty owner, not the existing browser',async()=>{
     const f=await fixture(),client=await f.register();
     try {

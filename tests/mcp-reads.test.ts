@@ -10,7 +10,7 @@ test('MCP reads paginate only the authenticated owner and hide other operations'
     const insert=db.prepare('INSERT INTO comics VALUES (?,?,?,?)');
     for (const [id,owner] of [['a','alice'],['b','alice'],['c','bob']]) insert.run(id,owner,JSON.stringify({title:id,plot:'story'}),null);
     const service={listStyles:()=>({styles:[]})} as unknown as ReturnType<typeof createComicService>;
-    const reads=createMcpReads(db,service,{getOwned:()=>null},async()=>null);
+    const reads=createMcpReads(db,service,{getOwned:()=>null,listActiveOwned:()=>[]},async()=>null);
     const identity={actor:'alice',scopes:['comex:read'] as const};
     const first=await reads.listComics(identity,{limit:1});
     expect(first).toEqual({comics:[{id:'a',title:'a',plot:'story',published:false}],nextCursor:'a'});

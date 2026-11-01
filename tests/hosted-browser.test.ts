@@ -32,7 +32,7 @@ postgres('hosted browser adapter',()=>{
   });
   test('browser sessions and the shared service see the same private draft',async()=>{
     let providerCalls=0;
-    const backend=createHostedBackend({pool,objects:new MemoryObjects(),origin:'https://comex.example',budgetFetch:async()=>{providerCalls++;throw new Error('not allowed');}});
+    const backend=createHostedBackend({pool,objects:new MemoryObjects(),origin:'https://comex.example',workspaceSecret:'test-workspace-secret-32-characters-long',budgetFetch:async()=>{providerCalls++;throw new Error('not allowed');}});
     const create=new NextRequest('https://comex.example/api/comics',{method:'POST',headers:{host:'comex.example',origin:'https://comex.example','content-type':'application/json'},body:JSON.stringify({title:'A story',plot:'A parcel crosses town',style:'clear-line-adventure',email:'owner@example.test'})});
     const created=await handleApi(create,['comics'],backend);
     expect(created.status).toBe(201);
@@ -44,7 +44,7 @@ postgres('hosted browser adapter',()=>{
     expect((await backend.service.get(identity!.owner,comic.id)).comic.title).toBe('A story');
     await pool.query('INSERT INTO import_batches(id,fingerprint) VALUES ($1,$2)',['hidden','fixture']);
     await pool.query('INSERT INTO comics(id,owner,revision,draft,import_batch_id) VALUES ($1,$2,1,$3,$4)', ['hidden',identity!.owner,JSON.stringify({title:'Unclaimed',plot:'private'}),'hidden']);
-    const reads=createMcpReads(pool,backend.service,{getOwned:()=>null},async()=>null);
+    const reads=createMcpReads(pool,backend.service,{getOwned:()=>null,listActiveOwned:()=>[]},async()=>null);
     expect((await reads.listComics({actor:identity!.owner,scopes:['comex:read']},{limit:10})).comics).toEqual([{id:comic.id,title:'A story',plot:'A parcel crosses town',published:false}]);
     const get=(headers:Record<string,string>)=>new NextRequest(`https://comex.example/api/comics/${comic.id}`,{headers:{host:'comex.example',...headers}});
     expect((await handleApi(get({cookie}),['comics',comic.id],backend)).status).toBe(200);
@@ -55,21 +55,24 @@ postgres('hosted browser adapter',()=>{
     expect(providerCalls).toBe(0);
   });
   test('rejects a noncanonical or insecure hosted origin',()=>{
-    const options={pool,objects:new MemoryObjects(),budgetFetch:async()=>new Response()};
+    const options={pool,objects:new MemoryObjects(),workspaceSecret:'test-workspace-secret-32-characters-long',budgetFetch:async()=>new Response()};
     expect(()=>createHostedBackend({...options,origin:'https://comex.example/path'})).toThrow();
     expect(()=>createHostedBackend({...options,origin:'http://comex.example'})).toThrow();
   });
   test('a hosted guest session can be confirmed before starting a durable create',async()=>{
-    const backend=createHostedBackend({pool,objects:new MemoryObjects(),origin:'https://comex.example',budgetFetch:async()=>{throw new Error('not allowed');}});
+    const backend=createHostedBackend({pool,objects:new MemoryObjects(),origin:'https://comex.example',workspaceSecret:'test-workspace-secret-32-characters-long',budgetFetch:async()=>{throw new Error('not allowed');}});
     const guest=(cookie?:string)=>new NextRequest('https://comex.example/api/auth/guest',{method:'POST',headers:{host:'comex.example',origin:'https://comex.example','content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify({email:'new@example.test'})});
     const first=await handleApi(guest(),['auth','guest'],backend);
     const cookie=first.headers.get('set-cookie')!.split(';')[0];
     expect(first.status).toBe(200);
+    const firstBody=await first.json();expect(firstBody.workspaceId).toMatch(/^[a-f0-9]{64}$/);
     const repeated=await handleApi(guest(cookie),['auth','guest'],backend);
     expect(repeated.status).toBe(200);
     expect(repeated.headers.get('set-cookie')).toBeNull();
     const owner=await backend.auth.guestIdentity(cookie.slice('comex_session='.length));
     expect(owner).not.toBeNull();
+    expect((await repeated.json()).workspaceId).toBe(firstBody.workspaceId);
+    expect(firstBody.workspaceId).not.toBe(owner!.owner);
     const client=await pool.connect();
     try {
       await client.query('BEGIN');

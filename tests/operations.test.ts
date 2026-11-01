@@ -15,6 +15,25 @@ type Harness={repo:OperationRepository<any>;other:OperationRepository<any>;allow
 const input=(key:string,owner='alice')=>({owner,action:'generate_page',requestKey:key,targetId:'comic',grantId:'grant',expectedVersions:{revision:1},input:{page:'page-1'}});
 
 function contracts(make:(maxCalls?:number,maxConcurrent?:number)=>Promise<Harness>) {
+  test('active discovery is bounded, owner scoped, target scoped and contains no request input',async()=>{
+    const h=await make();try {
+      const queued=(await h.repo.start({...input('list-queued'),expectedVersions:9,input:{pageId:'page-1',other:'private'}},h.allow)).operation;
+      const review=(await h.repo.start(input('list-review'),h.allow)).operation;
+      const r=(await h.repo.claimOperation(review.id,300_000))!;await h.repo.finishOperation(r,'needs_review',{private:'not listed'});
+      const unknown=(await h.repo.start({...input('list-unknown'),targetId:'other'},h.allow)).operation;
+      const u=(await h.repo.claimOperation(unknown.id,300_000))!;await h.repo.releaseUnknown(u);
+      const failed=(await h.repo.start(input('list-failed'),h.allow)).operation;
+      const f=(await h.repo.claimOperation(failed.id,300_000))!;await h.repo.finishOperation(f,'failed',null);
+      await h.repo.start(input('list-other-owner','bob'),h.allow);
+      const listed=await h.repo.listActiveOwned('alice');
+      expect(new Set(listed.map(row=>row.id))).toEqual(new Set([queued.id,review.id,unknown.id,failed.id]));
+      expect(listed.every(row=>!('input' in row)&&!('grantId' in row)&&!('requestKey' in row))).toBe(true);
+      expect(listed.find(row=>row.id===queued.id)?.targetIds).toEqual({pageId:'page-1'});
+      expect(listed.find(row=>row.id===queued.id)?.expectedRevision).toBe(9);
+      expect((await h.repo.listActiveOwned('alice','comic')).map(row=>row.id).sort()).toEqual([queued.id,review.id,failed.id].sort());
+      expect(await h.repo.listActiveOwned('bob','other')).toEqual([]);
+    } finally {await h.close();}
+  });
   test('concurrent duplicate starts return one operation and one durable dispatch intent',async()=>{
     const h=await make();try {
       let creates=0;const guard=(tx:any,context:any)=>{if(context.phase==='create')creates++;return h.allow(tx,context);};
@@ -25,6 +44,8 @@ function contracts(make:(maxCalls?:number,maxConcurrent?:number)=>Promise<Harnes
       const id=starts[0].operation.id;
       expect(await h.repo.getOwned('bob',id)).toBeNull();
       expect(await h.repo.getOwned('alice',id)).toMatchObject({id,owner:'alice',status:'queued'});
+      expect(await h.repo.findOwned('alice','generate_page','same')).toMatchObject({id});
+      expect(await h.repo.findOwned('bob','generate_page','same')).toBeNull();
       await expect(Promise.resolve().then(()=>h.repo.start({...input('same'),input:{page:'page-2'}},h.allow))).rejects.toMatchObject({code:'idempotency_conflict'});
       const different=await h.repo.start(input('same','bob'),h.allow);expect(different.operation.id).not.toBe(id);
       const first=await h.repo.claimIntent(300_000);const second=await h.other.claimIntent(300_000);
@@ -66,6 +87,26 @@ function contracts(make:(maxCalls?:number,maxConcurrent?:number)=>Promise<Harnes
       expect(await h.repo.claimIntent(300_000)).toBeNull();
       expect(await h.repo.requeueIntent(operation.id)).toBe(true);
       expect((await h.other.claimIntent(300_000))?.operationId).toBe(operation.id);
+    } finally {await h.close();}
+  });
+  test('a delivered intent whose worker never starts is independently redelivered',async()=>{
+    const h=await make();try {
+      const {operation}=await h.repo.start(input('never-started'),h.allow),intent=(await h.repo.claimIntent(300_000))!;
+      expect(await h.repo.ackIntent(intent,'run-lost')).toBe(true);await h.expire('intent',operation.id);
+      expect(await h.repo.recoverStalled(10)).toEqual({requeued:1,unknown:0});
+      expect((await h.repo.claimIntent(300_000))?.operationId).toBe(operation.id);
+    } finally {await h.close();}
+  });
+  test('an expired delivered worker with a dispatched step becomes unknown without redelivery',async()=>{
+    const h=await make();try {
+      const {operation}=await h.repo.start(input('stalled-paid'),h.allow),intent=(await h.repo.claimIntent(300_000))!;
+      await h.repo.ackIntent(intent,'run-lost');const lease=(await h.repo.claimOperation(operation.id,300_000))!;
+      await h.repo.claimPaidStep(lease,{id:'image',input:{}},h.allow);
+      await h.expire('intent',operation.id);await h.expire('operation',operation.id);
+      expect(await h.repo.recoverStalled(10)).toEqual({requeued:0,unknown:1});
+      expect(await h.repo.getOwned('alice',operation.id)).toMatchObject({status:'unknown_outcome'});
+      expect(await h.repo.getStep('alice',operation.id,'image')).toMatchObject({state:'unknown'});
+      expect(await h.repo.claimIntent(300_000)).toBeNull();expect(await h.counts()).toEqual({used:1,active:1,unknown:1});
     } finally {await h.close();}
   });
   test('expired workers are fenced, and replay of a possibly dispatched step becomes unknown',async()=>{
@@ -141,6 +182,9 @@ function contracts(make:(maxCalls?:number,maxConcurrent?:number)=>Promise<Harnes
       await h.repo.claimPaidStep(lease,{id:'image',input:{page:1}},h.allow);
       await h.repo.completePaidStep(lease,'image','unknown',null);
       expect(await h.repo.getOwned('alice',operation.id)).toMatchObject({status:'unknown_outcome'});
+      await h.repo.commitCheckpoint(lease,'unknown-marker',{state:'unknown'},h.allow);
+      await expect(Promise.resolve().then(()=>h.repo.reconcileUnknown(operation.id,'image','completed',{asset:'found'},h.allow))).rejects.toMatchObject({code:'invalid_transition'});
+      await h.repo.releaseUnknown(lease);
       await expect(Promise.resolve().then(()=>h.repo.reconcileUnknown(operation.id,'image','completed',{asset:'found'},h.deny))).rejects.toThrow('policy denied');
       expect(await h.counts()).toEqual({used:1,active:1,unknown:1});
       await h.repo.reconcileUnknown(operation.id,'image','completed',{asset:'found'},h.allow);
@@ -148,6 +192,17 @@ function contracts(make:(maxCalls?:number,maxConcurrent?:number)=>Promise<Harnes
       const next=(await h.repo.claimOperation(operation.id,300_000))!;
       expect(await h.repo.claimPaidStep(next,{id:'image',input:{page:1}},h.allow)).toMatchObject({kind:'completed',result:{asset:'found'}});
       expect((await h.repo.claimIntent(300_000))?.operationId).toBe(operation.id);
+    } finally {await h.close();}
+  });
+  test('a confirmed failed unknown is requeued for service cleanup without a new dispatch',async()=>{
+    const h=await make();try {
+      const {operation}=await h.repo.start(input('recover-failed'),h.allow),lease=(await h.repo.claimOperation(operation.id,300_000))!;
+      await h.repo.claimPaidStep(lease,{id:'review',input:{}},h.allow);await h.repo.completePaidStep(lease,'review','unknown',null);await h.repo.releaseUnknown(lease);
+      await h.repo.reconcileUnknown(operation.id,'review','failed',null,h.allow);
+      expect(await h.repo.getOwned('alice',operation.id)).toMatchObject({status:'queued'});
+      const resumed=(await h.repo.claimOperation(operation.id,300_000))!;
+      expect(await h.repo.claimPaidStep(resumed,{id:'review',input:{}},h.allow)).toMatchObject({kind:'failed'});
+      expect(await h.counts()).toEqual({used:1,active:0,unknown:0});
     } finally {await h.close();}
   });
   test('grant policy is rechecked before each new paid step',async()=>{
@@ -180,6 +235,7 @@ function contracts(make:(maxCalls?:number,maxConcurrent?:number)=>Promise<Harnes
       await h.repo.completePaidStep(lease,'first','unknown',null);
       expect(await h.counts()).toEqual({used:2,active:2,unknown:2});
       expect(await h.repo.getStep('alice',operation.id,'second')).toMatchObject({state:'unknown'});
+      await h.repo.releaseUnknown(lease);
       await h.repo.reconcileUnknown(operation.id,'first','completed',{found:1},h.allow);
       expect(await h.repo.getOwned('alice',operation.id)).toMatchObject({status:'unknown_outcome'});
       expect(await h.repo.claimOperation(operation.id,300_000)).toBeNull();
@@ -240,7 +296,7 @@ postgresDescribe('Postgres operations contract',()=>{
   beforeAll(async()=>{admin=new Pool({connectionString:process.env.TEST_DATABASE_URL});await admin.query(`CREATE SCHEMA "${schema}"`);pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,options:`-c search_path=${schema}`});other=new Pool({connectionString:process.env.TEST_DATABASE_URL,options:`-c search_path=${schema}`});await applyMigrations(pool);});
   afterAll(async()=>{await pool?.end();await other?.end();if(admin){await admin.query(`DROP SCHEMA "${schema}" CASCADE`);await admin.end();}});
   contracts(async(maxCalls=1,maxConcurrent=maxCalls)=>{
-    await pool.query('TRUNCATE operation_checkpoints,operation_steps,operation_dispatch_intents,operations,provider_reservations');
+    await pool.query('TRUNCATE comic_text_operations,operation_checkpoints,operation_steps,operation_dispatch_intents,operations,provider_reservations');
     await pool.query('CREATE TABLE IF NOT EXISTS test_application (value integer NOT NULL)');await pool.query('TRUNCATE test_application');await pool.query('INSERT INTO test_application VALUES (0)');
     const repo=new PostgresOperationRepository(pool,{maxCalls,maxConcurrent}),second=new PostgresOperationRepository(other,{maxCalls,maxConcurrent});
     return {repo,other:second,allow:async()=>{},deny:async()=>{throw new Error('policy denied');},
@@ -252,7 +308,7 @@ postgresDescribe('Postgres operations contract',()=>{
       close:async()=>{}};
   });
   test('Postgres grant row lock is held through the reservation transaction',async()=>{
-    await pool.query('TRUNCATE operation_checkpoints,operation_steps,operation_dispatch_intents,operations,provider_reservations');
+    await pool.query('TRUNCATE comic_text_operations,operation_checkpoints,operation_steps,operation_dispatch_intents,operations,provider_reservations');
     await pool.query('CREATE TABLE IF NOT EXISTS test_grant_lock (revoked integer NOT NULL)');
     await pool.query('TRUNCATE test_grant_lock');await pool.query('INSERT INTO test_grant_lock VALUES (0)');
     const repo=new PostgresOperationRepository(pool,{maxCalls:3,maxConcurrent:1});

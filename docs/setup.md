@@ -12,6 +12,16 @@ Story-question, planning, and revision requests also hold a per-draft reservatio
 
 When the OpenAI item exists in 1Password, copy `.env.example` to `.env.local`, set `OPENAI_API_KEY` to its `op://vault/item/field` reference, set the call limit, and start with `op run --env-file=.env.local -- bun run dev --hostname 127.0.0.1`. Do not paste the secret into source files or chat. The selected account must allow that item and model access.
 
+## Hosted MCP
+
+The hosted browser and MCP endpoint share a Postgres database, a private Vercel Blob store, and Vercel Workflow. Configure the canonical HTTPS `COMEX_APP_URL`, `COMEX_RUNTIME=hosted`, `DATABASE_URL`, `BLOB_READ_WRITE_TOKEN`, the OpenAI models and call limit, and separate secrets for browser email authentication (`COMEX_AUTH_SECRET`) and MCP authentication (`COMEX_MCP_AUTH_SECRET`, at least 32 characters). Email sign-in also needs `COMEX_EMAIL_FROM` and `RESEND_API_KEY`. See `.env.example`; supply secrets through the deployment's secret manager.
+
+Apply the versioned database migrations deliberately to the intended database with `bun scripts/hosted-storage.ts migrate`. The app does not migrate or import local drafts automatically. See [MCP authentication and local-draft handoff](mcp-auth.md) for consent, scoped connections, and importing an existing local workspace.
+
+The generation scheduler uses Vercel Workflow and the cron in `vercel.json`. Configure a random `CRON_SECRET` of at least 16 characters and expose Vercel system environment variables, including `VERCEL_DEPLOYMENT_ID`, to the deployment. Vercel's one-minute cron schedule requires a Pro or Enterprise plan; cron runs on production deployments, not previews. See [Vercel cron usage](https://vercel.com/docs/cron-jobs/usage-and-pricing) and [cron setup](https://vercel.com/docs/cron-jobs/quickstart). Requests can trigger pending work as well, but the independent scheduler is needed for recovery after clients disconnect.
+
+`COMEX_MCP_ALLOWED_ORIGINS` may contain additional comma-separated HTTPS browser origins that are allowed to call `/mcp`; native MCP clients do not need an Origin header. Missing hosted configuration prevents private and paid operations from falling back to local state. The [connection guide](mcp.md) and [acceptance procedure](research/mcp-acceptance.md) distinguish local tests from deployed client verification. For an interrupted hosted provider step, use the [hosted reconciliation procedure](research/mcp-reconciliation.md), not the SQLite recovery commands below.
+
 ## Recovering a provider reservation
 
 A process can stop after dispatch but before saving the response. In that case the reservation remains `running`; a lost or invalid response is recorded as `unknown`. Both block the concurrency slot, even after restart. Neither state proves whether the provider charged for or finished the request. Do not automatically retry or delete reservation records.

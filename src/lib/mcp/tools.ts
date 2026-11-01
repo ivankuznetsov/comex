@@ -20,7 +20,7 @@ const paidAnnotation={...mutationAnnotation,openWorldHint:true};
 const destructiveAnnotation={...mutationAnnotation,destructiveHint:true,openWorldHint:true};
 const ticketSchema=z.object({id, status:z.enum(['queued','running','succeeded','needs_review','failed','unknown_outcome','obsolete','revoked']),comicId:id.optional()}).strict();
 
-export const instructions='Use Comex as a guided workflow. After creating a draft, start its initial questions, then character suggestions, as the editor does. Present the saved questions and suggested answers exactly; let the creator choose. Show the saved character suggestions. After adding a character, start its reference image, then ask the creator to review it. Never invent answers or approve for the creator. Show the current references, story beats and dialogue, findings and exact versions before asking for approval. Narrative and panel blockers may be explicitly accepted only after confirming with the creator. Use the saved next steps; request keys prevent duplicate work. Poll operations and never retry unknown paid outcomes automatically. Export is private; publish or withdraw only on explicit request.';
+export const instructions='Use Comex as a guided workflow. After creating a draft, start its initial questions, then character suggestions, as the editor does. Present the saved questions and suggested answers exactly; let the creator choose. Show the saved character suggestions. After adding a character, start its reference image, then ask the creator to review it. Never invent answers or approve for the creator. Show the current references, story beats and dialogue, findings and exact versions before asking for approval. Narrative and panel blockers may be explicitly accepted only after confirming with the creator. Use the saved next steps; request keys prevent duplicate work. Find existing work with comex_list_operations, poll it, and never retry unknown paid outcomes automatically. Export is private; publish or withdraw only on explicit request.';
 
 type ToolDefinition={name:string; action:MutationAction; description:string; schema:z.ZodType; scopes:readonly ComexScope[]; paid?:boolean; destructive?:boolean};
 const write=['comex:write'] as const, generate=['comex:write','comex:generate'] as const, publish=['comex:write','comex:publish'] as const;
@@ -86,6 +86,10 @@ export function registerTools(server:McpServer,deps:ComexMcpDependencies,identit
     const operation=await deps.reads.getOperation(identity,String(args.operationId));
     const nextStep=operation.status==='unknown_outcome' ? 'Inspect and resolve this outcome; do not retry paid work automatically.' : operation.status==='queued' || operation.status==='running' ? 'Poll this operation again.' : operation.status==='needs_review' ? 'Inspect the current comic and review its pending decision.' : operation.status==='succeeded' ? 'Inspect the current comic and follow its next steps.' : 'Inspect the operation and current comic before deciding what to do.';
     return result(operation.status,'Current operation.',safe({...operation,nextStep}));
+  });
+  registerRead('comex_list_operations','Find recent in-progress, review-needed, failed or unknown operations for this workspace or comic, including work started in another client.',z.object({comicId:id.optional()}).strict(),async args=>{
+    const list=await deps.reads.listOperations(identity,typeof args.comicId==='string'?args.comicId:undefined);
+    return result('ok','Recent operations.',safe({operations:list.operations.slice(0,50)}));
   });
   registerRead('comex_get_asset','Preview one private image belonging to this owner’s comic; images over 10 MiB must be reviewed in the editor.',z.object({comicId:id,assetId}).strict(),async args=>{
     const image=await deps.reads.getAsset(identity,String(args.comicId),String(args.assetId));

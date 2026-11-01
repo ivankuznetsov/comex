@@ -20,6 +20,7 @@ export type BrowserBackend = {
   auth: BrowserAuthStore;
   service: ReturnType<typeof createComicService>;
   validateRequest(request: NextRequest): boolean;
+  workspaceId(owner:string):string;
 };
 async function owner(request: NextRequest, store: BrowserAuthStore): Promise<string | null> {
   const authenticated = request.cookies.get('comex_auth')?.value;
@@ -100,17 +101,19 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
         const identity = token && /^[a-f0-9]{64}$/.test(token) ? await store.authIdentity(token) : null;
         const guestToken=request.cookies.get('comex_session')?.value;
         const guest=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? await store.guestIdentity(guestToken) : null;
-        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null});
+        const effective=identity?.owner ?? guest?.owner ?? (backend ? await owner(request,store) : null);
+        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null,...(backend ? {workspaceId:effective ? backend.workspaceId(effective) : null} : {})});
       }
       // Require Origin for these endpoints; never derive an email link from the Host header.
       const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
       if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
       if (backend && segments.length === 2 && segments[1] === 'guest' && method === 'POST') {
         const {email:rawEmail}=await input(request,z.object({email:z.string().trim().email().max(254)}).strict());
-        if (await owner(request,store)) return reply({ok:true});
+        const existing=await owner(request,store);
+        if (existing) return reply({ok:true,workspaceId:backend.workspaceId(existing)});
         const at=rawEmail.lastIndexOf('@');
         const guest=await store.createGuest(`${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}`);
-        const response=reply({ok:true});
+        const response=reply({ok:true,workspaceId:backend.workspaceId(guest.owner)});
         response.cookies.set('comex_session',guest.token,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
         return response;
       }
@@ -207,7 +210,6 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     const id=segments[1], session=await owner(request,store);
     if (!session) throw new HttpError(404,'Comic not found.');
     if (segments.length === 2 && method === 'GET') return reply(await service.get(session,id));
-    // Preserve the existing not-found boundary before parsing a mutation.
     const {comic: initial} = await service.get(session,id);
     if (segments[2] === 'assets' && segments.length === 4 && method === 'GET') return imageResponse(await service.getAsset(session,id,segments[3]));
     if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'download' && method === 'GET') return imageResponse(await service.downloadPage(session,id,segments[3],initial.revision),segments[3]);

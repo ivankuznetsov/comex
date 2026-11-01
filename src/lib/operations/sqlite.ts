@@ -46,16 +46,17 @@ export class SqliteOperationRepository extends BaseOperations<DatabaseSync> {
         const effect:Effect<DatabaseSync>=next.value;let result:unknown;
         if(effect.kind==='time') result=Date.now();
         else if(effect.kind==='budget_lock'||effect.kind==='request_lock') result=undefined;
-        else if(effect.kind==='policy') {
-          if(Object.prototype.toString.call(effect.policy)==='[object AsyncFunction]') throw new Error('SQLite transaction policies must be synchronous.');
+        else if(effect.kind==='policy'||effect.kind==='work') {
+          const callback=effect.kind==='policy'?effect.policy:effect.work;
+          if(Object.prototype.toString.call(callback)==='[object AsyncFunction]') throw new Error('SQLite transaction policies must be synchronous.');
           const scope=policyScope(this.db);
-          try {result=effect.policy(scope.client,effect.context);} finally {scope.close();}
+          try {result=callback(scope.client,effect.context);} finally {scope.close();}
           if(result && typeof (result as Promise<unknown>).then==='function') {
             void Promise.resolve(result).catch(()=>{});
             throw new Error('SQLite transaction policies must be synchronous.');
           }
         } else {
-          const sql=effect.sql.replace(/ FOR UPDATE OF i SKIP LOCKED/g,'').replace(/ FOR UPDATE/g,'');
+          const sql=effect.sql.replace(/ FOR UPDATE(?: OF [a-z,]+)?(?: SKIP LOCKED)?/g,'');
           const statement=this.db.prepare(sql);
           if(/^\s*SELECT\b/i.test(sql)||/\bRETURNING\b/i.test(sql)) {const rows=statement.all(...effect.params);result={rows,rowCount:rows.length};}
           else {const outcome=statement.run(...effect.params);result={rows:[],rowCount:Number(outcome.changes)};}
