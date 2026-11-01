@@ -1,0 +1,29 @@
+# Credentials and local tooling
+.env
+.env.*
+!.env.example
+.vercel/
+.aws/
+.codex/
+.agents/
+*.pem
+*.key
+
+# Dependencies and builds
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Private runtime data and raw evaluation artifacts
+data/
+storage/
+evals/results/
+test-results/
+playwright-report/
+*.sqlite
+*.sqlite-*
+*.db
+*.log
