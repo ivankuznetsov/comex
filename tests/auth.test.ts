@@ -16,10 +16,10 @@ function configure(){process.env.COMEX_APP_URL='http://localhost:3000';process.e
 const codeOf=(text:string)=>text.match(/code is (\d{8})/)![1];
 
 describe('email code authentication',()=>{
- test('a new browser can create and later claim drafts without entering an email first',async()=>{
+ test('a new browser enters an email when creating and later verifies it to claim drafts',async()=>{
   const store=new LocalStore(':memory:');state.__comexLocalStore=store;configure();let text='';
   globalThis.fetch=(async(_u,init)=>{text=JSON.parse(String(init?.body)).text;return new Response('{}',{status:200});}) as typeof fetch;
-  const made=await run('comics',{title:'Draft',plot:'A story',style:'ink-manga'});expect(made.status).toBe(201);
+  const made=await run('comics',{title:'Draft',plot:'A story',style:'ink-manga',email:'creator@example.test'});expect(made.status).toBe(201);
   const id=(await made.json()).comic.id,guest=cookie(made,'comex_session');
   expect((await run(`comics/${id}`,undefined,guest)).status).toBe(200);
   const issued=await run('auth/request',{email:'creator@example.test',claimGuest:true},guest);expect(issued.status).toBe(200);

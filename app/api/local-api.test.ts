@@ -345,7 +345,9 @@ test('legacy browser drafts and their private assets remain accessible without r
     expect(list.status).toBe(200); expect((await list.json()).comics.some((comic:{id:string})=>comic.id===id)).toBe(true);
     expect((await handleApi(request(`comics/${id}`,'GET',undefined,cookie),['comics',id])).status).toBe(200);
     const next=await post('comics',{title:'Next draft',plot:'Another delivery',style:'ink-manga',email:'legacy@example.test'},cookie);
-    expect(next.status).toBe(201);expect(store.getOwned((await next.json()).comic.id,owner)).not.toBeNull();
+    expect(next.status).toBe(201);const migratedOwner=store.guestIdentity(owner)!.owner;
+    expect(store.getOwned((await next.json()).comic.id,migratedOwner)).not.toBeNull();
+    expect(store.getOwned(id,migratedOwner)).not.toBeNull();
     const image=await handleApi(request(`comics/${id}/assets/${assetId}`,'GET',undefined,cookie),['comics',id,'assets',assetId]);
     expect(image.status).toBe(200); expect(Buffer.from(await image.arrayBuffer())).toEqual(png);
     const unknown=`comex_session=${randomBytes(32).toString('hex')}`;

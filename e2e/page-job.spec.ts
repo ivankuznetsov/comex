@@ -22,7 +22,6 @@ test('page job survives browser reload and is shared across tabs',async ({browse
     await page.getByLabel('appearance',{exact:true}).fill('Short red hair');
     await page.getByLabel('outfit',{exact:true}).fill('Yellow raincoat');
     await page.getByRole('button',{name:'Add character'}).click();
-    await page.getByRole('button',{name:'Draw reference (AI call)'}).click();
     await expect(page.getByAltText('Reference for Mina')).toBeVisible();
     await page.getByRole('button',{name:'Approve',exact:true}).click();
     await page.getByRole('button',{name:/Plan story/}).click();

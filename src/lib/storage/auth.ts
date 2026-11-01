@@ -55,6 +55,7 @@ export class PostgresAuth {
     });
   }
   async updateGuestEmail(token:string,email:string,now=Date.now()):Promise<boolean> {return (await this.pool.query('UPDATE auth_guests SET email=$1 WHERE token_hash=$2 AND expires_at>$3',[email,hash(token),now])).rowCount===1;}
+  async bindGuestEmail(token:string,email:string,now=Date.now()):Promise<boolean> {return (await this.pool.query("UPDATE auth_guests SET email=$1 WHERE token_hash=$2 AND expires_at>$3 AND email=''",[email,hash(token),now])).rowCount===1;}
   async issueCode(email:string,code:string,browser:string,secret:string,now=Date.now()):Promise<string|null> {
     return this.locked(async c=>{
       await c.query('DELETE FROM auth_requests WHERE requested_at<$1',[now-3600000]);await c.query('DELETE FROM auth_codes WHERE expires_at<=$1',[now]);
