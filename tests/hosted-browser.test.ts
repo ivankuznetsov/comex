@@ -62,6 +62,11 @@ postgres('hosted browser adapter',()=>{
   test('a hosted guest session can be confirmed before starting a durable create',async()=>{
     const backend=createHostedBackend({pool,objects:new MemoryObjects(),origin:'https://comex.example',workspaceSecret:'test-workspace-secret-32-characters-long',budgetFetch:async()=>{throw new Error('not allowed');}});
     const guest=(cookie?:string)=>new NextRequest('https://comex.example/api/auth/guest',{method:'POST',headers:{host:'comex.example',origin:'https://comex.example','content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify({email:'new@example.test'})});
+    const noEmail=new NextRequest('https://comex.example/api/auth/guest',{method:'POST',headers:{host:'comex.example',origin:'https://comex.example','content-type':'application/json'},body:'{}'});
+    expect((await handleApi(noEmail,['auth','guest'],backend)).status).toBe(400);
+    const emailLess=await backend.auth.createGuest('');
+    expect((await handleApi(guest(`comex_session=${emailLess.token}`),['auth','guest'],backend)).status).toBe(200);
+    expect(await backend.auth.guestIdentity(emailLess.token)).toEqual({owner:emailLess.owner,email:'new@example.test'});
     const first=await handleApi(guest(),['auth','guest'],backend);
     const cookie=first.headers.get('set-cookie')!.split(';')[0];
     expect(first.status).toBe(200);

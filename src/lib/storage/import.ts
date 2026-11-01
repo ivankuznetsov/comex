@@ -8,10 +8,44 @@ import {sha256, type PrivateObjects} from './assets';
 type Row=Record<string, string|number|Uint8Array|null>;
 const legacyTables=['comics','publication_assets','comic_text_operations','auth_users','auth_sessions','auth_requests','auth_guests','auth_codes','auth_code_attempts','provider_reservations'] as const;
 const operationTables=['operations','operation_dispatch_intents','operation_steps','operation_checkpoints'] as const;
-const tables=[...legacyTables,...operationTables,'mcp_grants'] as const;
+const tables=[...legacyTables,...operationTables,'mcp_grants','advisory_reviews'] as const;
 /** Import owner IDs cannot be used as browser credentials before redemption. */
 export const importOwnerPrefix=(batchId:string)=>`import:${createHash('sha256').update(batchId).digest('hex')}:`;
 export const importStagedOwner=(batchId:string,owner:string)=>importOwnerPrefix(batchId)+owner;
+
+const isRecord=(value:unknown):value is Record<string,unknown> => !!value && typeof value==='object' && !Array.isArray(value);
+
+/** Fold only current-version advisory evidence into the imported draft, as the local editor does. */
+function resolveImportedAdvisories(raw:string, reviews:Map<string,unknown>):string {
+  const draft:unknown=JSON.parse(raw);
+  if(!isRecord(draft))return raw;
+  const validReview=(value:unknown):value is {outcome:'pass'|'findings'|'inconclusive'|'failed';findings:unknown[]} =>
+    isRecord(value) && typeof value.outcome==='string' && ['pass','findings','inconclusive','failed'].includes(value.outcome) && Array.isArray(value.findings);
+  let changed=false;
+  if(typeof draft.storyReviewRunId==='string') {
+    const story=reviews.get(`story:${draft.storyReviewRunId}:${draft.storyRevision}`);
+    if(validReview(story)){draft.storyReview=story;changed=true;}
+  }
+  const panelReviews=isRecord(draft.panelReviews)?{...draft.panelReviews}:{};
+  const panelFindings=isRecord(draft.panelFindings)?{...draft.panelFindings}:{};
+  if(Array.isArray(draft.pages)) for(const page of draft.pages) {
+    if(!isRecord(page) || !Array.isArray(page.panels))continue;
+    for(const panel of page.panels) {
+      if(!isRecord(panel) || typeof panel.id!=='string' || typeof panel.assetId!=='string' || panel.storyRevision!==draft.storyRevision || panel.status==='outdated')continue;
+      const review=reviews.get(`panel:${panel.id}:${panel.assetId}:${panel.storyRevision}:${panel.revision}`);
+      if(!validReview(review))continue;
+      panelReviews[panel.id]={assetId:panel.assetId,storyRevision:panel.storyRevision,panelRevision:panel.revision,outcome:review.outcome};
+      panelFindings[panel.id]=review.findings;changed=true;
+      if(panel.status==='checking') {
+        const evaluation=review.findings.some(f=>isRecord(f) && f.severity==='blocker')?'blocker':review.findings.some(f=>isRecord(f) && f.severity==='warning')?'warning':review.outcome==='pass'?'pass':'uncertain';
+        panel.evaluation=evaluation;panel.status=evaluation==='pass'?'current':'needs_review';
+      }
+    }
+  }
+  if(!changed)return raw;
+  draft.panelReviews=panelReviews;draft.panelFindings=panelFindings;
+  return JSON.stringify(draft);
+}
 
 /** Import a caller-selected SQLite snapshot and asset directory. Never opens the source for writing. */
 export async function importSqlite({pool,objects,databasePath,budgetPath,assetPath,batchId}:{pool:Pool;objects:PrivateObjects;databasePath:string;budgetPath?:string;assetPath:string;batchId:string}):Promise<void> {
@@ -67,7 +101,16 @@ export async function importSqlite({pool,objects,databasePath,budgetPath,assetPa
   // Preserve fingerprints of pre-U5 imports that have no additional records.
   const fingerprintSnapshot:Record<string,Row[]>=Object.fromEntries(legacyTables.map(table=>[table,snapshot[table]]));
   if(operationTables.some(table=>snapshot[table].length) || snapshot.mcp_grants.length)for(const table of [...operationTables,'mcp_grants'] as const)fingerprintSnapshot[table]=snapshot[table];
+  if(snapshot.advisory_reviews.length)fingerprintSnapshot.advisory_reviews=snapshot.advisory_reviews;
   const fingerprint=createHash('sha256').update(JSON.stringify({snapshot:fingerprintSnapshot,assets:privateAssets.map(({id,hash})=>({id,hash}))})).digest('hex');
+  const reviewsByComic=new Map<string,Map<string,unknown>>();
+  for(const review of snapshot.advisory_reviews) {
+    if(typeof review.comic_id!=='string' || typeof review.review_key!=='string' || typeof review.result!=='string')continue;
+    try {
+      const reviews=reviewsByComic.get(review.comic_id) ?? new Map<string,unknown>();
+      reviews.set(review.review_key,JSON.parse(review.result));reviewsByComic.set(review.comic_id,reviews);
+    } catch { /* Malformed evidence must not unblock an unfinished review. */ }
+  }
   const client=await pool.connect();
   try {
     await client.query('BEGIN');
@@ -79,7 +122,11 @@ export async function importSqlite({pool,objects,databasePath,budgetPath,assetPa
       await client.query('COMMIT');return;
     }
     await client.query('INSERT INTO import_batches(id,fingerprint) VALUES ($1,$2)',[batchId,fingerprint]);
-    for(const r of snapshot.comics) await client.query('INSERT INTO comics(id,owner,revision,draft,edition,published_at,import_batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',[r.id,r.owner,r.revision,r.draft,r.edition,r.published_at,batchId]);
+    for(const r of snapshot.comics) {
+      const reviews=typeof r.id==='string'?reviewsByComic.get(r.id):undefined;
+      const draft=reviews && typeof r.draft==='string'?resolveImportedAdvisories(r.draft,reviews):r.draft;
+      await client.query('INSERT INTO comics(id,owner,revision,draft,edition,published_at,import_batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',[r.id,r.owner,r.revision,draft,r.edition,r.published_at,batchId]);
+    }
     for(const r of snapshot.comic_text_operations) await client.query('INSERT INTO comic_text_operations(comic_id,owner,state) VALUES ($1,$2,$3)',[r.comic_id,r.owner,r.state]);
     for(const a of privateAssets) {
       const path=await objects.put(`imports/${randomUUID()}.png`,a.data);

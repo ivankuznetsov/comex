@@ -47,6 +47,33 @@ async function owner(request: NextRequest, store: BrowserAuthStore): Promise<str
   // Do not revive expired guests or treat current internal owner IDs as cookies.
   return !await store.hasGuestToken(guest) && await store.hasLegacyOwner(guest) ? guest : null;
 }
+/** Existing anonymous workspaces can acquire an email without losing their drafts. */
+async function creatorOwner(request:NextRequest,store:BrowserAuthStore,email?:string):Promise<string|null> {
+  const current=await owner(request,store);
+  if (!current) return null;
+  const authToken=request.cookies.get('comex_auth')?.value;
+  if (authToken && /^[a-f0-9]{64}$/.test(authToken) && await store.authIdentity(authToken)) return current;
+  const guestToken=request.cookies.get('comex_session')?.value;
+  if (!guestToken || !/^[a-f0-9]{64}$/.test(guestToken)) return current;
+  const guest=await store.guestIdentity(guestToken);
+  if (guest?.email) {
+    if (email && guest.email!==email) throw new HttpError(409,'The email for this browser session changed. Refresh and try again.');
+    return current;
+  }
+  if (!email) throw new HttpError(400,'Enter your email to start creating.');
+  if (guest) {
+    if (!await store.bindGuestEmail(guestToken,email)) {
+      const bound=await store.guestIdentity(guestToken);
+      if (!bound?.email) throw new HttpError(409,'This browser session has expired.');
+      if (bound.email!==email) throw new HttpError(409,'The email for this browser session changed. Refresh and try again.');
+    }
+    return current;
+  }
+  const claimed=await store.claimLegacyOwner(guestToken,email);
+  if (!claimed) throw new HttpError(409,'This browser session has expired.');
+  if (claimed.email!==email) throw new HttpError(409,'The email for this browser session changed. Refresh and try again.');
+  return claimed.owner;
+}
 function assertOrigin(request: NextRequest) {
   const origin = request.headers.get('origin');
   if (origin) {
@@ -184,10 +211,12 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
       if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
       if (backend && segments.length === 2 && segments[1] === 'guest' && method === 'POST') {
         const {email:rawEmail}=await input(request,z.object({email:z.string().trim().email().max(254).optional()}).strict());
-        const existing=await owner(request,store);
-        if (existing) return reply({ok:true,workspaceId:backend.workspaceId(existing)});
         const at=rawEmail?.lastIndexOf('@') ?? -1;
-        const guest=await store.createGuest(rawEmail ? `${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}` : '');
+        const email=rawEmail ? `${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}` : undefined;
+        const existing=await creatorOwner(request,store,email);
+        if (existing) return reply({ok:true,workspaceId:backend.workspaceId(existing)});
+        if (!email) throw new HttpError(400,'Enter your email to start creating.');
+        const guest=await store.createGuest(email);
         const response=reply({ok:true,workspaceId:backend.workspaceId(guest.owner)});
         response.cookies.set('comex_session',guest.token,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
         return response;
@@ -274,9 +303,11 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     }
     if (segments.length === 1 && method === 'POST') {
       const body=parse(await input(request,z.unknown()),createSchema);
-      let session=await owner(request,store); let guestToken:string | null=null;
+      const at=body.email?.lastIndexOf('@') ?? -1;
+      const email=body.email ? `${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}` : undefined;
+      let session=await creatorOwner(request,store,email); let guestToken:string | null=null;
       if (!session) {
-        const at=body.email?.lastIndexOf('@') ?? -1; const email=body.email ? `${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}` : '';
+        if (!email) throw new HttpError(400,'Enter your email to start creating.');
         const guest=await store.createGuest(email); session=guest.owner; guestToken=guest.token;
       }
       const response=reply(await service.create(session,body),201);

@@ -20,7 +20,6 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByLabel('outfit', { exact: true }).fill('Yellow coat');
   await page.getByRole('button', { name: 'Add character' }).click();
   await expect(page.getByLabel('What does Mina want?')).toHaveValue('Deliver the key safely');
-  await page.getByRole('button',{name:'Draw reference (AI call)'}).click();
   await expect(page.getByAltText('Reference for Mina')).toBeVisible();
   await page.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(page.getByText('Approved', { exact:true })).toBeVisible();
@@ -32,7 +31,6 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByLabel('outfit',{exact:true}).fill('Dark coat');
   await page.getByRole('button',{name:'Add character',exact:true}).click();
   const oriel=page.locator('article').filter({has:page.getByRole('heading',{name:'Oriel'})});
-  await oriel.getByRole('button',{name:'Draw reference (AI call)'}).click();
   await expect(oriel.getByAltText('Reference for Oriel')).toBeVisible();
   await oriel.getByRole('button',{name:'Approve',exact:true}).click();
   await expect(oriel.getByRole('button',{name:'Edit card'})).toBeVisible();

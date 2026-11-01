@@ -4,6 +4,54 @@ test.skip(process.env.COMEX_E2E_MODE!=='hosted','Requires the isolated hosted-mo
 
 test.beforeEach(async({page})=>{await page.route('**/api/auth/session',route=>route.fulfill({json:{user:{email:'creator@example.test'},guest:null,workspaceId:'workspace-a'}}));});
 
+test('an email-less legacy workspace can bind email and create a draft',async({browser})=>{
+  const context=await browser.newContext(),page=await context.newPage();let bound=false;
+  await context.route('**/api/auth/session',route=>route.fulfill({json:{user:null,guest:{email:bound?'legacy@example.test':''},workspaceId:bound?'workspace-new':'workspace-old'}}));
+  await context.route('**/api/auth/guest',async route=>{expect(route.request().postDataJSON()).toEqual({email:'legacy@example.test'});bound=true;await route.fulfill({json:{ok:true,workspaceId:'workspace-new'}});});
+  await context.route('**/api/operations**',async route=>{
+    if(route.request().method()==='POST')return route.fulfill({status:202,json:{id:'new-operation',status:'queued'}});
+    return route.fulfill({json:{id:'new-operation',action:'create',status:'succeeded',comicId:'legacy-new-comic',result:{comic:{id:'legacy-new-comic'}}}});
+  });
+  try {
+    await page.goto('/create');await page.getByLabel('Your email address').fill('legacy@example.test');
+    await page.getByLabel('Give your comic a title').fill('Legacy draft');await page.getByLabel('What happens in your story?').fill('A courier carries a key.');
+    await page.getByRole('button',{name:'Start creating →'}).click();
+    await expect(page).toHaveURL(/\/comics\/legacy-new-comic/);
+    await expect(page.getByText('Your workspace changed. Refresh before continuing.')).toHaveCount(0);
+  } finally {await context.close();}
+});
+
+test('an unknown automatic reference is not dispatched again after reload',async({page})=>{
+  const draft:any={id:'reference-unknown',title:'Reference',plot:'A courier carries a key.',style:'ink-manga',revision:1,storyRevision:1,characters:[],questions:[],answers:{},initialQuestions:'complete',initialSuggestions:'complete',pages:[]};
+  let references=0, added=false;
+  await page.route('**/api/comics/reference-unknown',route=>route.fulfill({json:{comic:draft}}));
+  await page.route('**/api/operations**',route=>{
+    const request=route.request(),url=new URL(request.url());
+    if(request.method()==='POST') {
+      const body=request.postDataJSON();
+      if(body.action==='addCharacter')return route.fulfill({status:202,json:{id:'add-op',status:'queued',comicId:draft.id}});
+      if(body.action==='generateReference'){references++;return route.fulfill({status:202,json:{id:'reference-op',status:'queued',comicId:draft.id}});}
+      return route.fulfill({status:500,json:{error:'Unexpected operation'}});
+    }
+    if(url.pathname==='/api/operations')return route.fulfill({json:{operations:references?[{id:'reference-op',action:'generateReference',comicId:draft.id,characterId:'char-1',status:'unknown_outcome'}]:[]}});
+    if(url.pathname.endsWith('/add-op')) {
+      if(!added){added=true;draft.characters=[{id:'char-1',name:'Mina',role:'Courier',appearance:'Red hair',outfit:'Blue coat',approved:false,referenceStatus:'missing'}];draft.revision++;}
+      return route.fulfill({json:{id:'add-op',action:'addCharacter',comicId:draft.id,status:'succeeded',result:{characterId:'char-1'}}});
+    }
+    draft.characters[0].referenceStatus='unknown_outcome';
+    return route.fulfill({json:{id:'reference-op',action:'generateReference',comicId:draft.id,status:'unknown_outcome'}});
+  });
+  await page.goto('/comics/reference-unknown');
+  await page.getByLabel('name',{exact:true}).fill('Mina');await page.getByLabel('role',{exact:true}).fill('Courier');
+  await page.getByLabel('appearance',{exact:true}).fill('Red hair');await page.getByLabel('outfit',{exact:true}).fill('Blue coat');
+  await page.getByRole('button',{name:'Add character',exact:true}).click();
+  await expect.poll(()=>references).toBe(1);
+  await expect(page.getByText('The reference request could not be confirmed. Resolve the previous request before trying again.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('The reference request could not be confirmed. Resolve the previous request before trying again.')).toBeVisible();
+  expect(references).toBe(1);
+});
+
 test('hosted editor restores jobs, asks the saved questions and requires each approval',async({browser})=>{
   test.setTimeout(90000);
   const context=await browser.newContext(),page=await context.newPage();
@@ -13,7 +61,7 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
   const storyState={location:'Town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
   const draft:any={id:'mock-comic',title:'Courier',plot:'Mina carries a key to the lighthouse.',style:'ink-manga',revision:1,storyRevision:1,characters:[],questions:[],answers:{},characterSuggestions:[],initialQuestions:'pending',initialSuggestions:'pending',pages:[],published:false,publication:null};
   await context.route('**/api/auth/session',route=>route.fulfill({json:{user:null,guest:guestReady?{email:'guest@example.test'}:null,workspaceId:guestReady?'workspace-a':null}}));
-  await context.route('**/api/auth/guest',async route=>{expect(jobs.size).toBe(0);guestReady=true;await route.fulfill({json:{ok:true,workspaceId:'workspace-a'}});});
+  await context.route('**/api/auth/guest',async route=>{expect(jobs.size).toBe(0);expect(route.request().postDataJSON()).toEqual({email:'guest@example.test'});guestReady=true;await route.fulfill({json:{ok:true,workspaceId:'workspace-a'}});});
   await context.route('**/api/comics/mock-comic/assets/**',route=>route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nmL0AAAAASUVORK5CYII=','base64')}));
   await context.route('**/api/comics/mock-comic',route=>route.fulfill({json:{comic:draft}}));
   await context.route('**/api/operations**',async route=>{
@@ -49,8 +97,8 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     return route.fulfill({json:{id,action,comicId:'mock-comic',status:'succeeded',result:job.result}});
   });
   try {
-    await page.goto('/create');await page.getByLabel('Give your comic a title').fill('Courier');await page.getByLabel('What happens in your story?').fill(draft.plot);
-    await page.getByRole('button',{name:'Start creating →'}).click();await expect(page).toHaveURL(/\/comics\/mock-comic/);
+    await page.goto('/create');await page.getByLabel('Your email address').fill('guest@example.test');await page.getByLabel('Give your comic a title').fill('Courier');await page.getByLabel('What happens in your story?').fill(draft.plot);
+    await page.getByRole('button',{name:'Start creating →'}).click();await expect(page).toHaveURL(/\/comics\/mock-comic/,{timeout:30_000});
     await expect.poll(()=>requests.filter(item=>item.action==='initialQuestions').length).toBe(1);
     const firstQuestionKey=requests.find(item=>item.action==='initialQuestions')!.requestKey;
     await page.reload();
@@ -64,7 +112,6 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     expect(new Set(requests.filter(item=>item.action==='suggestCharacters').map(item=>item.requestKey)).size).toBe(1);
     await second.close();
     await page.getByRole('button',{name:'Review suggestion'}).click();await page.getByRole('button',{name:'Add character',exact:true}).click();
-    await page.getByRole('button',{name:'Draw reference (AI call)'}).click();
     await expect.poll(()=>requests.filter(item=>item.action==='generateReference').length).toBe(1);
     await page.reload();releaseReference=true;
     await expect(page.getByAltText('Reference for Mina')).toBeVisible({timeout:15000});
@@ -80,7 +127,7 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     await expect(page.getByText('These findings are advisory; no approval is needed.')).toBeVisible();
     expect(requests.filter(item=>item.action==='acceptPanel')).toHaveLength(0);
     await page.getByRole('button',{name:'Prepare download'}).click();const download=page.getByRole('link',{name:'Download page'});await expect(download).toHaveAttribute('href',/\/api\/operations\/op-\d+\/export/);
-    await page.getByRole('button',{name:'Publish',exact:true}).click();await page.getByRole('button',{name:'Publish comic'}).click();await expect(page.getByText('Published! Your comic is now on the community shelf.')).toBeVisible();
+    await page.getByRole('button',{name:'Publish',exact:true}).click();await page.getByRole('button',{name:'Publish comic'}).click();await expect(page.getByText('Published! Your comic is now on the community shelf:',{exact:false})).toBeVisible();
     expect(requests.find(item=>item.action==='publish')?.input.expectedEditionId).toBeNull();
   } finally {await context.close();}
 });
