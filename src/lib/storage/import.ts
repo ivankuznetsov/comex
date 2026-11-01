@@ -56,6 +56,7 @@ export async function importSqlite({pool,objects,databasePath,budgetPath,assetPa
     const existing=new Set((source.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {name:string}[]).map(r=>r.name));
     const operationTableCount=operationTables.filter(table=>existing.has(table)).length;
     if(operationTableCount!==0 && operationTableCount!==operationTables.length)throw new Error('The source operation history is incomplete; import was not started.');
+    if(existing.has('page_jobs') && source.prepare("SELECT 1 FROM page_jobs WHERE state IN ('running','unknown') LIMIT 1").get())throw new Error('Finish or resolve active page jobs before importing.');
     for(const table of tables) snapshot[table]=existing.has(table) ? source.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Row[] : [];
     source.exec('COMMIT');
   } finally {source.close();}
@@ -139,7 +140,19 @@ export async function importSqlite({pool,objects,databasePath,budgetPath,assetPa
     for(const r of snapshot.auth_users) await client.query('INSERT INTO auth_users(email,owner) VALUES ($1,$2)',[r.email,r.owner]);
     for(const r of snapshot.auth_sessions) await client.query('INSERT INTO auth_sessions(token_hash,owner,expires_at) VALUES ($1,$2,$3)',[r.token_hash,r.owner,r.expires_at]);
     for(const r of snapshot.auth_requests) await client.query('INSERT INTO auth_requests(email_hash,requested_at,request_id,rejected) VALUES ($1,$2,$3,$4)',[r.email_hash,r.requested_at,r.request_id??null,r.rejected??0]);
-    for(const r of snapshot.auth_guests) await client.query('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES ($1,$2,$3,$4)',[r.token_hash,r.owner,r.email,r.expires_at??Date.now()+30*24*60*60*1000]);
+    for(const r of snapshot.auth_guests) {
+      const expiry=r.expires_at??Date.now()+30*24*60*60*1000;
+      await client.query('INSERT INTO auth_guests(token_hash,owner,email,expires_at) VALUES ($1,$2,$3,$4)',[r.token_hash,r.owner,r.email,expiry]);
+      await client.query("INSERT INTO mcp_import_identity_proofs VALUES ($1,'guest',$2,$3,$4)",[batchId,r.token_hash,r.owner,expiry]);
+    }
+    for(const r of snapshot.auth_sessions) await client.query("INSERT INTO mcp_import_identity_proofs VALUES ($1,'auth',$2,$3,$4)",[batchId,r.token_hash,r.owner,r.expires_at]);
+    // A legacy owner was the original browser token. Only owners satisfying
+    // the old store's legacy-owner rule qualify, and only for 30 days.
+    const oldOwners=new Set(snapshot.comics.map(row=>row.owner));
+    for(const oldOwner of oldOwners) {
+      if(typeof oldOwner!=='string' || !/^[a-f0-9]{64}$/.test(oldOwner) || snapshot.auth_guests.some(r=>r.owner===oldOwner) || snapshot.auth_users.some(r=>r.owner===oldOwner))continue;
+      await client.query("INSERT INTO mcp_import_identity_proofs VALUES ($1,'legacy',$2,$3,$4)",[batchId,createHash('sha256').update(oldOwner).digest('hex'),oldOwner,Date.now()+30*24*60*60*1000]);
+    }
     for(const r of snapshot.auth_codes) await client.query('INSERT INTO auth_codes(email,code_hash,salt,browser_hash,expires_at) VALUES ($1,$2,$3,$4,$5)',[r.email,r.code_hash,r.salt,r.browser_hash,r.expires_at]);
     for(const r of snapshot.auth_code_attempts) await client.query('INSERT INTO auth_code_attempts(email_hash,attempted_at) VALUES ($1,$2)',[r.email_hash,r.attempted_at]);
     for(const r of snapshot.provider_reservations) await client.query('INSERT INTO provider_reservations(id,state,created_at,updated_at,step_key) VALUES ($1,$2,$3,$4,$5)',[r.id,r.state,r.created_at,r.updated_at,r.step_key??null]);

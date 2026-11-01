@@ -99,7 +99,11 @@ export function subscribeHostedWorkspace(listener:()=>void):()=>void {
 }
 export async function hostedSession(required=true):Promise<BrowserSession> {
   for(let attempt=0;attempt<2;attempt++) {
-    const before=localStorage.getItem(workspaceMarker),session=await request<BrowserSession>('/api/auth/session');
+    const before=localStorage.getItem(workspaceMarker);let session=await request<BrowserSession>('/api/auth/session');
+    if('importRecoveryAvailable' in session && session.importRecoveryAvailable) {
+      await request<{recovered:boolean}>('/api/auth/recover-import',{method:'POST',body:'{}'});
+      session=await request<BrowserSession>('/api/auth/session');
+    }
     if(before!==localStorage.getItem(workspaceMarker))continue;
     if(!('workspaceId' in session)) {if(required)throw new Error('The hosted workspace is unavailable.');return session;}
     activateHostedWorkspace(session.workspaceId ?? null);return session;

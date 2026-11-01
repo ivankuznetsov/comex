@@ -32,6 +32,8 @@ export type BrowserBackend = {
   service: ReturnType<typeof createComicService>;
   validateRequest(request: NextRequest): boolean;
   workspaceId(owner:string):string;
+  recoverImport?(cookie:string):Promise<'recovered'|'none'|'blocked'>;
+  hasImportRecovery?(cookie:string):Promise<boolean>;
 };
 async function owner(request: NextRequest, store: BrowserAuthStore): Promise<string | null> {
   const authenticated = request.cookies.get('comex_auth')?.value;
@@ -197,6 +199,7 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     const method=request.method;
     if (segments[0] === 'auth') {
       if (segments.length === 2 && segments[1] === 'session' && method === 'GET') {
+        const importRecoveryAvailable=backend?.hasImportRecovery ? await backend.hasImportRecovery(request.headers.get('cookie') ?? '') : false;
         const token = request.cookies.get('comex_auth')?.value;
         const identity = token && /^[a-f0-9]{64}$/.test(token) ? await store.authIdentity(token) : null;
         const guestToken=request.cookies.get('comex_session')?.value;
@@ -204,11 +207,17 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
         const effective=identity?.owner ?? guest?.owner ?? (backend ? await owner(request,store) : null);
         let signInAvailable=false;
         try {const url=new URL(process.env.COMEX_APP_URL || '');signInAvailable=url.origin===`${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}` && !!process.env.RESEND_API_KEY && !!process.env.COMEX_EMAIL_FROM && (process.env.COMEX_AUTH_SECRET?.length??0)>=32;} catch { /* Email delivery has not been configured. */ }
-        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null,signInAvailable,...(backend ? {workspaceId:effective ? backend.workspaceId(effective) : null} : {})});
+        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null,signInAvailable,...(backend ? {workspaceId:effective ? backend.workspaceId(effective) : null,importRecoveryAvailable} : {})});
       }
       // Require Origin for these endpoints; never derive an email link from the Host header.
       const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
       if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+      if (backend?.recoverImport && segments.length===2 && segments[1]==='recover-import' && method==='POST') {
+        await input(request,z.object({}).strict());
+        const result=await backend.recoverImport(request.headers.get('cookie') ?? '');
+        if(result==='blocked')throw new HttpError(409,'Your saved drafts need recovery before they can be opened.');
+        return reply({recovered:result==='recovered'});
+      }
       if (backend && segments.length === 2 && segments[1] === 'guest' && method === 'POST') {
         const {email:rawEmail}=await input(request,z.object({email:z.string().trim().email().max(254).optional()}).strict());
         const at=rawEmail?.lastIndexOf('@') ?? -1;

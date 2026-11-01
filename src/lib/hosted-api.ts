@@ -7,6 +7,7 @@ import {PostgresAssets, type PrivateObjects} from './storage/assets';
 import {PostgresAuth} from './storage/auth';
 import {PostgresRepository} from './storage/postgres';
 import {workspaceId} from './auth/workspace';
+import {hasSameOriginImport,recoverSameOriginImport} from './auth/claim';
 
 /** A hosted browser and MCP must use the same database and private object store. */
 export function createHostedBackend(options:{pool:Pool; objects:PrivateObjects; origin:string; workspaceSecret:string; budgetFetch:NonNullable<AIOptions['fetch']>}):BrowserBackend {
@@ -19,5 +20,5 @@ export function createHostedBackend(options:{pool:Pool; objects:PrivateObjects; 
   const service = createComicService({repository:new PostgresRepository(options.pool,options.objects),
     assets:new PostgresAssets(options.pool,options.objects),provider:createAIService,
     budgetFetch:options.budgetFetch,id:randomUUID});
-  return {auth,service,workspaceId:owner=>workspaceId(owner,options.workspaceSecret),validateRequest:request => request.nextUrl.origin === canonical.origin && request.headers.get('host') === canonical.host};
+  return {auth,service,workspaceId:owner=>workspaceId(owner,options.workspaceSecret),hasImportRecovery:cookie=>hasSameOriginImport(options.pool,cookie),recoverImport:cookie=>recoverSameOriginImport(options.pool,cookie),validateRequest:request => request.nextUrl.origin === canonical.origin && request.headers.get('host') === canonical.host};
 }
