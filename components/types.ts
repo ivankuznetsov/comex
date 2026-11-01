@@ -1,8 +1,8 @@
 export type ComicStyle = 'clear-line-adventure' | 'ink-manga' | 'painted-storybook';
-export const styles: {id: ComicStyle; name: string; description: string; color: string}[] = [
-  {id: 'clear-line-adventure', name: 'Clear-line adventure', description: 'Bold outlines, flat colour, and a sense of adventure.', color: '#1849a9'},
-  {id: 'ink-manga', name: 'Ink manga', description: 'Expressive black-and-white ink and crisp silhouettes.', color: '#171717'},
-  {id: 'painted-storybook', name: 'Painted storybook', description: 'Soft painted texture, warm colour, and gentle shapes.', color: '#a84d30'},
+export const styles: {id: ComicStyle; name: string; description: string; image: string}[] = [
+  {id: 'clear-line-adventure', name: 'Clear-line adventure', description: 'Bold outlines, flat colour, and a sense of adventure.', image: '/styles/clear-line-adventure.webp'},
+  {id: 'ink-manga', name: 'Ink manga', description: 'Expressive black-and-white ink and crisp silhouettes.', image: '/styles/ink-manga.webp'},
+  {id: 'painted-storybook', name: 'Painted storybook', description: 'Soft painted texture, warm colour, and gentle shapes.', image: '/styles/painted-storybook.webp'},
 ];
 export type PublicComic = { id: string; title: string; creator: string; pageCount: number; coverUrl?: string | null };
 export type PublicEdition = { id: string; title: string; creator: string; editionId: string; pages: {id: string; imageUrl: string}[] };
