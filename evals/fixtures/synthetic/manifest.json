@@ -1,0 +1,413 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "light-restore",
+      "kind": "routing",
+      "split": "calibration",
+      "family": "lighthouse",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/lighthouse-lit.png",
+          "sha256": "5f1bd4fd777e34855c6e810d1df32032829df367c75557a62d1120753b1df271",
+          "role": "target panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "instruction": "Turn the light off.",
+        "panel": {
+          "action": "The lighthouse light is off."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple flat-color diagram"
+      },
+      "checks": [
+        {
+          "name": "route",
+          "question": "Which edit route fits the creator request and intended panel?",
+          "dimension": "story",
+          "label": "restore"
+        }
+      ]
+    },
+    {
+      "id": "light-story",
+      "kind": "routing",
+      "split": "calibration",
+      "family": "lighthouse",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/lighthouse-lit.png",
+          "sha256": "5f1bd4fd777e34855c6e810d1df32032829df367c75557a62d1120753b1df271",
+          "role": "target panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "instruction": "Turn the light off.",
+        "panel": {
+          "action": "The lighthouse light is on."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple flat-color diagram"
+      },
+      "checks": [
+        {
+          "name": "route",
+          "question": "Which edit route fits the creator request and intended panel?",
+          "dimension": "story",
+          "label": "story"
+        }
+      ]
+    },
+    {
+      "id": "light-cosmetic",
+      "kind": "routing",
+      "split": "calibration",
+      "family": "lighthouse",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/lighthouse-lit.png",
+          "sha256": "5f1bd4fd777e34855c6e810d1df32032829df367c75557a62d1120753b1df271",
+          "role": "target panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "instruction": "Make the tower outline thicker.",
+        "panel": {
+          "action": "The lighthouse light is on."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple flat-color diagram"
+      },
+      "checks": [
+        {
+          "name": "route",
+          "question": "Which edit route fits the creator request and intended panel?",
+          "dimension": "story",
+          "label": "cosmetic"
+        }
+      ]
+    },
+    {
+      "id": "light-ambiguous",
+      "kind": "routing",
+      "split": "calibration",
+      "family": "lighthouse",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/lighthouse-lit.png",
+          "sha256": "5f1bd4fd777e34855c6e810d1df32032829df367c75557a62d1120753b1df271",
+          "role": "target panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "instruction": "Fix the light.",
+        "panel": {
+          "action": "The lighthouse light is on."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple flat-color diagram"
+      },
+      "checks": [
+        {
+          "name": "route",
+          "question": "Which edit route fits the creator request and intended panel?",
+          "dimension": "story",
+          "label": "clarify"
+        }
+      ]
+    },
+    {
+      "id": "tower-restore",
+      "kind": "routing",
+      "split": "holdout",
+      "family": "tower",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/tower-lit.png",
+          "sha256": "36b642c53c29ab86598db3d3a706601fc58ab7ac71ebd85dd6310a78ea401fad",
+          "role": "target panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "instruction": "Make the window dark.",
+        "panel": {
+          "action": "The window is dark."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple flat-color diagram"
+      },
+      "checks": [
+        {
+          "name": "route",
+          "question": "Which edit route fits the creator request and intended panel?",
+          "dimension": "story",
+          "label": "restore"
+        }
+      ]
+    },
+    {
+      "id": "tower-story",
+      "kind": "routing",
+      "split": "holdout",
+      "family": "tower",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/tower-lit.png",
+          "sha256": "36b642c53c29ab86598db3d3a706601fc58ab7ac71ebd85dd6310a78ea401fad",
+          "role": "target panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "instruction": "Make the window dark.",
+        "panel": {
+          "action": "The window is lit."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple flat-color diagram"
+      },
+      "checks": [
+        {
+          "name": "route",
+          "question": "Which edit route fits the creator request and intended panel?",
+          "dimension": "story",
+          "label": "story"
+        }
+      ]
+    },
+    {
+      "id": "latch-match",
+      "kind": "visual",
+      "split": "calibration",
+      "family": "latch",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/latch-match.png",
+          "sha256": "5e686a3bc096753debc70859d2bcf3cc1bd4a6ed3f519e373b4021f9f540c3bb",
+          "role": "generated panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "panel": {
+          "action": "The key is inserted into the lock."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple diagram"
+      },
+      "checks": [
+        {
+          "name": "detail",
+          "question": "Is the key inserted into the lock?",
+          "dimension": "story",
+          "label": "match"
+        }
+      ]
+    },
+    {
+      "id": "latch-mismatch",
+      "kind": "visual",
+      "split": "calibration",
+      "family": "latch",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/latch-mismatch.png",
+          "sha256": "aeb7849a46943caeae8b972732e816a8d13cd1d40542e3bca937374ec2b1d689",
+          "role": "generated panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "panel": {
+          "action": "The key is inserted into the lock."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple diagram"
+      },
+      "checks": [
+        {
+          "name": "detail",
+          "question": "Is the key inserted into the lock?",
+          "dimension": "story",
+          "label": "mismatch"
+        }
+      ]
+    },
+    {
+      "id": "latch-occluded",
+      "kind": "visual",
+      "split": "calibration",
+      "family": "latch",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/latch-occluded.png",
+          "sha256": "4493ac1f09e6efca3ed5aeff4dcf972f175ddae497fa676158f38c9452446150",
+          "role": "generated panel",
+          "id": "panel-1"
+        }
+      ],
+      "evidence": {
+        "panel": {
+          "action": "The key is inserted into the lock."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [],
+        "styleRules": "Simple diagram"
+      },
+      "checks": [
+        {
+          "name": "detail",
+          "question": "Is the key inserted into the lock?",
+          "dimension": "story",
+          "label": "cannot_determine"
+        }
+      ]
+    },
+    {
+      "id": "outfit-change",
+      "kind": "visual",
+      "split": "holdout",
+      "family": "outfit",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/coat-blue.png",
+          "sha256": "bbf2b73bd9b41b5b4747785fc002929553bf714af6ba09fe9fd4dadefb5c13fa",
+          "role": "generated panel",
+          "id": "panel-1"
+        },
+        {
+          "file": "evals/fixtures/synthetic/coat-red.png",
+          "sha256": "05f6d869215a2813f416509514c1b181fd428482f703ae90f56e09cb0e60cd28",
+          "role": "approved character",
+          "id": "character-1"
+        }
+      ],
+      "evidence": {
+        "panel": {
+          "action": "The figure changed from the red coat in the reference to a blue coat."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [
+          {
+            "id": "character-1",
+            "name": "Figure",
+            "role": "figure",
+            "appearance": "round head",
+            "outfit": "as specified in the panel"
+          }
+        ],
+        "styleRules": "Simple diagram"
+      },
+      "checks": [
+        {
+          "name": "detail",
+          "question": "Does the panel show the intended blue coat?",
+          "dimension": "story",
+          "label": "match"
+        }
+      ]
+    },
+    {
+      "id": "monochrome",
+      "kind": "visual",
+      "split": "holdout",
+      "family": "monochrome",
+      "reviewed": false,
+      "rationale": "Synthetic candidate; the image and proposed label require independent human review.",
+      "images": [
+        {
+          "file": "evals/fixtures/synthetic/coat-mono.png",
+          "sha256": "eec57c04ce5801009d84cbbed37b64dd35a8bc1c53f00c3ed07f77f22f54faa2",
+          "role": "generated panel",
+          "id": "panel-1"
+        },
+        {
+          "file": "evals/fixtures/synthetic/coat-red.png",
+          "sha256": "05f6d869215a2813f416509514c1b181fd428482f703ae90f56e09cb0e60cd28",
+          "role": "approved character",
+          "id": "character-1"
+        }
+      ],
+      "evidence": {
+        "panel": {
+          "action": "The figure wears the same coat shown in the reference, rendered in monochrome."
+        },
+        "bible": {
+          "rules": []
+        },
+        "characters": [
+          {
+            "id": "character-1",
+            "name": "Figure",
+            "role": "figure",
+            "appearance": "round head",
+            "outfit": "as specified in the panel"
+          }
+        ],
+        "styleRules": "Simple diagram"
+      },
+      "checks": [
+        {
+          "name": "detail",
+          "question": "Does the coat shape match the reference without requiring the same color?",
+          "dimension": "story",
+          "label": "match"
+        }
+      ]
+    }
+  ]
+}

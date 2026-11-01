@@ -9,6 +9,7 @@
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests app/api/local-api.test.ts",
+    "eval:decisions": "bun evals/runner.ts",
     "test:e2e": "playwright test",
     "mcp:auth:migrate": "bun src/lib/auth/migrate.ts",
     "mcp:register-import": "bun src/lib/auth/register-import.ts",
