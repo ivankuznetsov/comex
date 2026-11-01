@@ -174,7 +174,7 @@ describe('shared comic application', () => {
       async panel() {imageCalls++; return png;},
       async editPanel() {imageCalls++; return png;},
       async visualJudge() {reviewCalls++; return reviewCalls===1 ? {outcome:'findings',findings:[finding]} : {outcome:'inconclusive',findings:[]};},
-      async classifyEdit() {return {intent:'artwork',reason:'Change the colours'};},
+      async classifyEditContextual() {return {intent:'cosmetic',reason:'Change the colours',question:null};},
       async revision() {return {earliest_affected_panel_id:'p2',explanation:'Mina keeps the key',revised_bible:bible,revised_suffix:[{...panels[1],action:'Keep the key'},{...panels[2],action:'Use the key'}]};},
       async narrativeJudge() {return {outcome:'findings',findings:[finding]};},
     };

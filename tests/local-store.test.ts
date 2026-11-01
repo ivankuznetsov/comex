@@ -17,10 +17,10 @@ describe('local draft storage', () => {
     const store=new LocalStore(':memory:');
     store.create('comic','owner',{title:'Draft'});
     expect(store.beginPageJob('comic','owner','page','job',1)?.created).toBe(true);
-    expect(store.updateWithoutActivePageJob('comic','owner',1,{title:'Uploaded'})).toBe(false);
+    expect(store.updateWithoutActiveWork('comic','owner',1,{title:'Uploaded'})).toBe(false);
     expect(store.getOwned('comic','owner')?.data).toEqual({title:'Draft'});
     store.finishPageJob('job','owner','completed',null);
-    expect(store.updateWithoutActivePageJob('comic','owner',1,{title:'Uploaded'})).toBe(true);
+    expect(store.updateWithoutActiveWork('comic','owner',1,{title:'Uploaded'})).toBe(true);
     store.close();
   });
   test('public reader sees only an explicit published snapshot', () => {

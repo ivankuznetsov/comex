@@ -79,6 +79,34 @@ describe('OpenAI adapter', () => {
     value={intent:'safe',reason:'yes'};
     expect(ai.classifyEdit({instruction:'change it',panelContext:'scene'})).rejects.toThrow('invalid');
   });
+  test('classifies with panel image, intended transition, dialogue, rules and labeled anchors', async () => {
+    let value:any={intent:'restore',reason:'The light should be off.',question:null}; let request:any;
+    const ai=createAIService({apiKey:'test',fetch:async(_url,init)=>{request=JSON.parse(String(init?.body));return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});}});
+    const before={location:'tower',time:'night',props:[{key:'lamp',value:'on'}],outfits:[],injuries:[],knowledge:[]};
+    const after={...before,props:[{key:'lamp',value:'off'}]};
+    const panel={id:'p1',index:1,character_ids:['mina'],action:'Mina turns the lamp off',framing:'wide',dialogue:[{speaker_id:'mina',text:'Dark now'}],state_before:before,state_after:after};
+    const bible={premise:'A lighthouse',setting:'coast',rules:['The lamp must be off'],character_ids:['mina']};
+    const characters=[{id:'mina',name:'Mina',role:'keeper',appearance:'hair',outfit:'coat'}];
+    const references=[{role:'target panel',id:'p1',bytes:new Uint8Array([1,2]),mimeType:'image/png' as const},{role:'approved character',id:'mina',bytes:new Uint8Array([3,4]),mimeType:'image/png' as const}];
+    const input={instruction:'Turn the light off',panel,bible,characters,references};
+    for(const intent of ['cosmetic','restore','story','clarify'] as const) {
+      value={intent,reason:'A reason',question:intent==='clarify'?'Which light?':null};
+      expect((await ai.classifyEditContextual(input)).intent).toBe(intent);
+    }
+    expect(request.text.format.name).toBe('edit_intent');
+    expect(request.input[0].content).toContain('intended storyboard');
+    const content=request.input[1].content, evidence=JSON.parse(content[0].text);
+    expect(evidence).toEqual({instruction:input.instruction,panel,bible,characters,reference_manifest:'Image 1: target panel, ID p1; Image 2: approved character, ID mina'});
+    expect(content.slice(1).map((item:any)=>item.image_url)).toEqual(['data:image/png;base64,AQI=','data:image/png;base64,AwQ=']);
+    expect(content[0].text).not.toContain('expected_label');
+    for(const invalid of [{intent:'clarify',reason:'Ambiguous',question:null},{intent:'story',reason:'Changes story',question:'Why?'},{intent:'safe',reason:'yes',question:null},{intent:'cosmetic',reason:'',question:null}]) {
+      value=invalid; await expect(ai.classifyEditContextual(input)).rejects.toThrow();
+    }
+    const refusal=createAIService({apiKey:'test',fetch:async()=>Response.json({status:'completed',output:[{type:'message',content:[{type:'refusal',refusal:'no'}]}]})});
+    await expect(refusal.classifyEditContextual(input)).rejects.toThrow('refused');
+    const failed=createAIService({apiKey:'test',fetch:async()=>Response.json({error:{}},{status:400})});
+    await expect(failed.classifyEditContextual(input)).rejects.toThrow('failed');
+  });
   test('revisions preserve the prefix and reject altered suffix IDs', async () => {
     const state={location:'station',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
     const p1={id:'p1',index:1,character_ids:['mina'],action:'Mina arrives',framing:'wide',dialogue:[],state_before:state,state_after:state};

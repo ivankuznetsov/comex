@@ -298,6 +298,7 @@ describe('durable comic phases',()=>{
       f.crashAt(`checkpoint:revision/${preview.id}/applied`);await expect(f.service.applyRevision(owner,id,{proposalId:preview.id},revision)).rejects.toBeInstanceOf(Crash);
       expect(f.local.getOwned<any>(id,owner)!.data.pendingRevision).toBeUndefined();
       const result=await f.service.applyRevision(owner,id,{proposalId:preview.id},revision);expect(result.comic.storyRevision).toBe(2);expect(result.comic.storyReview?.accepted).toBe(false);
+      expect(result.notice).toBe('Story updated. Review the updated artwork and checks.');
       expect(result.comic.pages[0].panels.every(panel=>!!panel.imageUrl)).toBe(true);
       expect(f.calls).toEqual(['revision','narrative','panel','visual','panel','visual']);
     }finally{f.local.close();}

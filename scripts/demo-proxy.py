@@ -27,6 +27,8 @@ FORWARDED_HEADERS = (
     "Next-Router-Segment-Prefetch", "Next-Url",
 )
 CLIENT_IO_TIMEOUT_SECONDS = 30
+REFERENCE_UPLOAD = re.compile(rf"^/api/comics/{UUID}/characters/{UUID}/reference/upload$")
+MAX_REFERENCE_REQUEST = 4 * 1024 * 1024 + 256 * 1024
 
 
 def https_origin(value):
@@ -81,7 +83,8 @@ class Preview(BaseHTTPRequestHandler):
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError()
             size = int(self.headers.get("Content-Length", "0"))
-            if size < 0 or size > 1_000_000:
+            limit = MAX_REFERENCE_REQUEST if self.command == "POST" and REFERENCE_UPLOAD.fullmatch(path) else 1_000_000
+            if size < 0 or size > limit:
                 raise ValueError()
         except ValueError:
             self.send_error(413, "Invalid or oversized request")

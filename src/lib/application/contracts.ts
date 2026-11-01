@@ -34,7 +34,7 @@ export interface ComicRepository {
   getOwned<T = unknown>(id:string, owner:Actor): MaybePromise<{revision:number;data:T} | null>;
   listOwned<T = unknown>(owner:Actor): MaybePromise<T[]>;
   update(id:string, owner:Actor, revision:number, data:unknown): MaybePromise<boolean>;
-  updateWithoutActivePageJob?(id:string, owner:Actor, revision:number, data:unknown): MaybePromise<boolean>;
+  updateWithoutActiveWork?(id:string, owner:Actor, revision:number, data:unknown): MaybePromise<boolean>;
   reserveTextOperation(id:string, owner:Actor, revision:number): MaybePromise<boolean>;
   finishTextOperation(id:string, owner:Actor, unknown:boolean): MaybePromise<void>;
   /** Reacquire only this operation's reconciled unknown reservation. */

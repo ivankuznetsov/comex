@@ -35,6 +35,7 @@ export function RevisionPreview({proposal, busy, error, onDismiss, onApply}: {
     <div className="border-[3px] border-[#171717] bg-[#fffef8] p-6 shadow-[6px_6px_0_#ffd83d]">
       <h2 id="revision-preview-title" className="font-display text-3xl font-normal uppercase">Review your story change</h2>
       <p className="mt-3">Changes start at page {proposal.affectedPage}, panel {proposal.affectedPanel}. Earlier panels stay unchanged.</p>
+      <p className="mt-3">The affected part of the first page may be redrawn when you apply the change. Later pages remain outdated until you generate them.</p>
       <p className="mt-3">{proposal.explanation}</p>
       <h3 className="mt-5 font-black">Proposed panel beats</h3>
       <ol className="mt-3 space-y-3">{proposal.panels.map(panel=><li key={panel.id} className="border-2 border-[#171717] p-3">

@@ -31,6 +31,8 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByLabel('outfit',{exact:true}).fill('Dark coat');
   await page.getByRole('button',{name:'Add character',exact:true}).click();
   const oriel=page.locator('article').filter({has:page.getByRole('heading',{name:'Oriel'})});
+  await expect(oriel.getByRole('button',{name:'Upload reference'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Upload a reference for new character'})).toBeDisabled();
   await expect(oriel.getByAltText('Reference for Oriel')).toBeVisible();
   await oriel.getByRole('button',{name:'Approve',exact:true}).click();
   await expect(oriel.getByRole('button',{name:'Edit card'})).toBeVisible();
@@ -61,6 +63,22 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('button', {name:'Apply artwork edit (AI call)'}).click();
   await expect.poll(async () => page.getByRole('img', {name:'Page 1, panel 1'}).getAttribute('src')).not.toBe(panel1Before);
   await expect(page.getByRole('img', {name:'Page 1, panel 2'})).toHaveAttribute('src', panel2Before!);
+  const firstEdit = await page.getByRole('img', {name:'Page 1, panel 1'}).getAttribute('src');
+  await page.getByLabel('Edit artwork').fill('E2E_CLARIFY Fix the lighthouse');
+  await page.getByRole('button',{name:'Apply artwork edit (AI call)'}).click();
+  await page.getByLabel('What should be restored?').fill('Make it dark');
+  await page.getByRole('button',{name:'Continue'}).click();
+  await expect.poll(() => page.getByRole('img',{name:'Page 1, panel 1'}).getAttribute('src')).not.toBe(firstEdit);
+  const beforeStory = await page.getByRole('img',{name:'Page 1, panel 1'}).getAttribute('src');
+  await page.getByLabel('Edit artwork').fill('E2E_STORY Turn on the lighthouse');
+  await page.getByRole('button',{name:'Apply artwork edit (AI call)'}).click();
+  await expect(page.getByText('This may change the story.')).toBeVisible();
+  await page.getByRole('status').filter({hasText:'This may change the story.'}).getByRole('button',{name:'Preview story change'}).click();
+  const routedPreview=page.getByRole('dialog',{name:'Review your story change'});
+  await expect(routedPreview.getByText(/Later pages remain outdated/)).toBeVisible();
+  await routedPreview.getByRole('button',{name:'Close preview'}).click();
+  await expect(page.getByRole('img',{name:'Page 1, panel 1'})).toHaveAttribute('src',beforeStory!);
+
   await page.getByRole('button', {name:'Publish', exact:true}).click();
   await page.getByLabel('Creator display name (optional)').fill('Mina Maker');
   await page.getByRole('button', {name:'Publish comic'}).click();
@@ -90,10 +108,12 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
   await revisionDialog.getByRole('button',{name:'Close preview'}).click();
   await page.reload();
+  await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
+  await revisionDialog.getByRole('button',{name:'Close preview'}).click();
   await page.getByRole('button',{name:'Page 2',exact:true}).click();
   await page.getByRole('img',{name:'Page 2, panel 2'}).click();
   await expect(page.getByLabel('Change the story')).toHaveValue('Mina takes the longer route');
-  await page.getByRole('button',{name:'Resume saved preview'}).click();
+  await page.getByRole('button',{name:'Show story revision preview'}).click();
   await expect(revisionDialog.getByText('Proposed panel beats')).toBeVisible();
   await revisionDialog.getByRole('button',{name:'Apply story change'}).click();
   await expect(page.getByText(/Story updated\. Later pages need to be drawn again\.|Later pages remain outdated until you .*generate them\./)).toBeVisible({timeout:40_000});
@@ -105,7 +125,7 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(page.getByText('Story changed — this page needs updating.')).toBeVisible();
   await reader.reload();
   await expect(reader.getByText('Page 2 of 3')).toBeVisible();
-  await page.getByRole('button',{name:'Generate page', exact:true}).click();
+  await page.getByRole('button',{name:'Redraw entire page', exact:true}).click();
   for (let j = 1; j <= 3; j++) {
     await page.getByRole('img',{name:`Page 3, panel ${j}`}).click();
   }
