@@ -16,7 +16,7 @@ camera; one honest caption says so. Public URL: the Vercel deployment (https://c
 | 43–57 s | Click Page 1, Page 2, Page 3 of *Moth and the Night Market*. Linger on the rope climb and the finale. Flash the inspector's continuity findings on one panel. | 5. "Then it draws, page by page. Same characters, same world, every panel checked for continuity." | Already rendered at `/comics/5c014b7d-c8a6-4163-816f-5074a2d25fb8`. Reload before showing. |
 | 57–69 s | Type into Change the story, click Preview, cut to the Before/After dialog ("Changes start at page 3, panel 3. Earlier panels stay unchanged."), click Apply, cut to the redrawn panel. | 6. "Change the plot, and Comex redraws only what that touches." | Preview ~30 s, redraw ~45 s: cut both. Or use the existing before/after editions of page 3. |
 | 69–81 s | Republish → Publish comic. Incognito window: gallery, Read comic, Next, Next, "THE END. FOR NOW." | 7. "Publish, and anyone can read it. No account. No app." | Incognito so it is visibly another session. |
-| 81–87 s | Credits card: gpt-5.6-terra + gpt-image-2.5-flare, "planned and written with Codex", one concrete Codex contribution. | 8. "Built today with OpenAI and Codex." | Static card. |
+| 81–87 s | Credits card: gpt-6.1-terra + gpt-image-2.5-flare, "planned and written with Codex", one concrete Codex contribution. | 8. "Built today with OpenAI and Codex." | Static card. |
 | 87–90 s | End card: public URL, repo, `/mcp`. | 9. "Your story starts here." | Fill URLs last. |
 
 ## Rules for the take

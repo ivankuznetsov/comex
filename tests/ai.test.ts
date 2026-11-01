@@ -10,13 +10,13 @@ describe('OpenAI adapter', () => {
   });
   test('uses structured output and validates tailored questions', async () => {
     let request: any;
-    const ai = createAIService({apiKey:'test', textModel:'gpt-5.6-terra', fetch: async (_url, init) => {
+    const ai = createAIService({apiKey:'test', textModel:'gpt-6.1-terra', fetch: async (_url, init) => {
       request = JSON.parse(String(init?.body));
       return Response.json({status:'completed', output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({questions:[{id:'q1',question:'Where?',suggested_answer:'London'}]})}]}]});
     }});
     const result = await ai.questions({plot:'A bird',style:'ink',answers:{},limit:3});
     expect(result).toEqual([{id:'q1',question:'Where?',suggestedAnswer:'London'}]);
-    expect(request.model).toBe('gpt-5.6-terra');
+    expect(request.model).toBe('gpt-6.1-terra');
     expect(request.reasoning).toEqual({effort:'medium'});
     expect(request.text.format.type).toBe('json_schema');
     expect(request.text.format.strict).toBe(true);

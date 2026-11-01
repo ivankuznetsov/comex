@@ -1,44 +1,68 @@
 # Comex
 
-Turn a story idea into a comic, with original characters, editable pages, and a public reading shelf. Comex is being built for the DevDay Exchange London Community Hackathon on 1 November 2026.
+Turn a story idea into a comic. Pick a style, describe your plot, approve your characters, and Comex draws a consistent comic page by page. Change the plot later and it redraws only what that change touches. Publish it and anyone can read it.
 
-The local build runs in a browser. The user interface follows an eighties comic-book direction; see the [design reference](docs/design/comex-design-reference.md). The [implementation plan](docs/plans/2026-11-01-1240-feat-comex-hackathon-plan.md) describes the complete intended journey.
+Built for the [DevDay Exchange London Community Hackathon](https://luma.com/dde-ldn-hack), 1 November 2026.
 
-[Watch the 43-second demo](docs/demo/comex-demo-simulated.mp4). It uses simulated AI and email providers with example artwork; it does not demonstrate live email delivery.
+- **Live app:** https://comex-seven.vercel.app
+- **Demo video (90 s):** https://seyarabata.com/d/6323c905120e · [play on GitHub](docs/demo/comex-demo-90s.mp4)
 
-## Local setup
+## What it does
 
-Install Bun 1.4.4 and Node.js 22.13 or later. In this checkout:
+1. **Idea.** Choose a style (clear-line adventure, ink manga or painted storybook) and write a few sentences of plot.
+2. **Questions.** Comex asks the questions a writer would ask and suggests answers.
+3. **Cast.** It suggests characters. You approve each reference sheet before any panel is drawn, or upload your own reference.
+4. **Pages.** Pages are drawn in order. Every panel gets an advisory continuity check.
+5. **Revise.** Edit one panel's artwork, or change the story. A preview shows which panels change; earlier panels stay untouched.
+6. **Publish.** Published comics appear on the public shelf and can be read without an account.
+
+## Install with a prompt
+
+Paste this into Codex, Claude Code, or any coding agent and it will connect Comex for you:
+
+```text
+Connect me to Comex, an AI comic creator, over MCP.
+1. Add a Streamable HTTP MCP server named "comex" with URL https://comex-seven.vercel.app/mcp
+   (Codex: `codex mcp add comex --url https://comex-seven.vercel.app/mcp`,
+    Claude Code: `claude mcp add --transport http comex https://comex-seven.vercel.app/mcp`).
+2. Log in with scopes comex:read comex:write comex:generate comex:publish offline_access
+   (Codex: `codex mcp login comex --scopes comex:read,comex:write,comex:generate,comex:publish,offline_access`;
+    Claude Code: run /mcp and authenticate "comex"), and tell me to approve the consent screen in my browser.
+3. List the Comex tools to confirm the connection works, then ask me what comic I want to make.
+```
+
+## Connect from Codex (MCP)
+
+Comex exposes a Streamable HTTP MCP endpoint, so you can create comics from Codex or ChatGPT:
+
+```sh
+codex mcp add comex --url https://comex-seven.vercel.app/mcp
+codex mcp login comex --scopes comex:read,comex:write,comex:generate,comex:publish,offline_access
+```
+
+Approve the consent screen in your browser, then ask Codex something like *"Make me a three-page ink-manga comic about a shy lantern repairer and her grumpy cat."* In ChatGPT, add a custom MCP server with the same URL under [Plugins](https://chatgpt.com/plugins). Details: [docs/mcp.md](docs/mcp.md).
+
+> **Status:** the MCP server is merged, but the hosted endpoint still needs its storage and OAuth configured. Until then `/mcp` returns "Comex MCP is not configured." The browser app works today.
+
+## Run locally
+
+Requires Bun 1.4.4 and Node.js 22.13+.
 
 ```sh
 bun install --frozen-lockfile
 bun run dev --hostname 127.0.0.1
 ```
 
-Open the local address printed by Next.js. Drafts and images are stored in the ignored `data/` directory. A creator can start without an email; the browser session lasts 30 days. When email delivery is configured, creators can choose to claim those drafts by signing in from the same browser. Real code delivery requires the sender and secrets described in [local setup](docs/setup.md).
-
-Each running server serves the checkout and configuration it was started from. A development server on port 3000 is not automatically the same build or database as another instance. Check its working directory and branch before testing. Provider-call limits are persistent across server restarts; an exhausted shared budget remains exhausted. Use separate `COMEX_DB_PATH`, `COMEX_ASSET_PATH`, and `COMEX_BUDGET_DB_PATH` values for an isolated test, and set an intentional call limit as described in the setup guide.
-
-Real story and image generation needs an OpenAI API key and access to the configured models. Keep the key in 1Password and inject it into the local process; never commit it. See [local setup](docs/setup.md) and `.env.example`. A local three-page test has been generated; see the [live test findings](docs/research/live-test-2026-11-01.md). Actual monetary cost has not been measured.
+Real generation needs an OpenAI API key and a provider-call limit. Keep the key in 1Password and inject it at runtime; see [docs/setup.md](docs/setup.md) and `.env.example`.
 
 ```sh
-bun run typecheck
-bun run test
-# With Chromium installed, run the isolated fake-provider browser suite:
-./e2e/run-full-flow.sh
-bun run build
+bun run typecheck && bun run test && bun run build
 ```
 
-## Scope and status
+## Stack
 
-The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; drawing a reference is a separate action. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background and their findings are advisory. Creators can draw the next page or publish once the artwork is complete, without approving individual panels. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
-
-The hosted implementation adds shared drafts and a remote MCP connection for Codex, ChatGPT, and Dot. It follows the editor's questions and review choices, including explicit approval of the displayed story and images. See [assistant connections](docs/mcp.md) and [hosted setup](docs/setup.md#hosted-mcp). SQLite and local asset storage remain for local development only. Deployment, hosted storage and durable jobs have not been verified in a deployed environment; the real client connections also require separate acceptance tests.
-
-The separate Vercel demo can route its API through a running local gateway, so its database, images and jobs remain on that machine. See [setup](docs/setup.md) for that temporary arrangement.
+Next.js, TypeScript, Tailwind CSS, Bun, OpenAI (`gpt-6.1-terra` for story and checks, `gpt-image-2.5-flare` for art), deployed on Vercel. The Vercel demo currently routes its API to a local gateway, so drafts and images live on the presenter's machine.
 
 ## Credits
 
-Planning, research, and implementation were assisted by OpenAI Codex. For example, Codex reproduced a race that discarded a paid character image when a draft title changed, then added version checks and regression coverage so unrelated changes no longer discard it. Interface inspiration is credited in the [design reference](docs/design/comex-design-reference.md); the included layout study is original. Dependencies are recorded in `package.json` and `bun.lock`.
-
-[Event](https://luma.com/dde-ldn-hack) · [OpenAI documentation](https://developers.openai.com/api/docs) · [Codex](https://developers.openai.com/codex)
+Planned and built with OpenAI Codex. One example: Codex reproduced a race that discarded a paid character image when a draft title changed, then added version checks and regression tests. Design reference: [docs/design](docs/design/comex-design-reference.md).
