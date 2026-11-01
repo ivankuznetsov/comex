@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { BudgetError, finalizeBudgetedResponse } from '../budget';
+import type { EditIntent } from '../edit-routing';
 
 export type AIErrorCode = 'missing_key' | 'provider_error' | 'unknown_outcome' | 'invalid_response' | 'refusal' | 'invalid_input';
 export class AIError extends Error {
@@ -23,6 +24,7 @@ const storyboardSchema = z.object({bible:z.object({premise:z.string(),setting:z.
 const bibleSchema = z.object({premise:z.string(),setting:z.string(),rules:z.array(z.string()),character_ids:z.array(z.string())}).strict();
 const revisionSchema = z.object({earliest_affected_panel_id:z.string(),explanation:z.string(),revised_bible:bibleSchema,revised_suffix:z.array(panelSchema)}).strict();
 const editIntentSchema = z.object({intent:z.enum(['artwork','story','uncertain']),reason:z.string()}).strict();
+const contextualEditIntentSchema = z.object({intent:z.enum(['cosmetic','restore','story','clarify']),reason:z.string(),question:z.string().nullable()}).strict();
 export type RevisionResult = z.infer<typeof revisionSchema>;
 const judgeSchema = z.object({outcome:z.enum(['pass','findings','inconclusive']),findings:z.array(z.object({severity:z.enum(['blocker','warning','uncertain']),dimension:z.string(),panel_id:z.string().nullable(),character_id:z.string().nullable(),reference_id:z.string().nullable(),expected:z.string(),observed:z.string(),repair:z.string()}).strict())}).strict();
 export type JudgeResult = z.infer<typeof judgeSchema>;
@@ -99,7 +101,7 @@ export function createAIService(options: AIOptions = {}) {
     await finalizeBudgetedResponse(response, 'completed');
     return result;
   }
-  async function structured<T>(name: string, schema: z.ZodType<T>, instruction: string, payload: unknown, references?: Reference[]): Promise<T> {
+  async function structured<T>(name: string, schema: z.ZodType<T>, instruction: string, payload: unknown, references?: Reference[], validateResult?: (value:T) => void): Promise<T> {
     const converted = z.toJSONSchema(schema) as Record<string,unknown>;
     delete converted.$schema;
     const content = references ? [{type:'input_text',text:JSON.stringify(payload)},...references.map(r => ({type:'input_image',image_url:`data:${r.mimeType};base64,${Buffer.from(r.bytes).toString('base64')}`,detail:'high'}))] : JSON.stringify(payload);
@@ -115,6 +117,7 @@ export function createAIService(options: AIOptions = {}) {
       try { parsed=JSON.parse(text); } catch { throw new AIError('invalid_response', 'The model returned invalid structured output.'); }
       const checked = schema.safeParse(parsed);
       if (!checked.success) throw new AIError('invalid_response', 'The model returned invalid structured output.');
+      validateResult?.(checked.data);
       return checked.data;
     }) as T;
   }
@@ -163,6 +166,15 @@ export function createAIService(options: AIOptions = {}) {
       if (!result.reason.trim()) throw new AIError('invalid_response','The edit classification needs a reason.');
       return result;
     },
+    async classifyEditContextual(input: {instruction:string;panel:unknown;bible:unknown;characters:CharacterInput[];references:Reference[]}): Promise<{intent:EditIntent;reason:string;question:string|null}> {
+      if (!input.instruction.trim()) throw new AIError('invalid_input','Edit instruction is required.');
+      checkReferences(input.references);
+      if (input.references[0].role !== 'target panel') throw new AIError('invalid_input','The target panel must be the first image reference.');
+      const payload = {instruction:input.instruction,panel:input.panel,bible:input.bible,characters:input.characters,reference_manifest:manifest(input.references)};
+      return structured('edit_intent',contextualEditIntentSchema,prompt('edit-routing','System'),payload,input.references,result => {
+        if (!result.reason.trim() || (result.intent === 'clarify' ? !result.question?.trim() : result.question !== null)) throw new AIError('invalid_response','The edit classification is incomplete.');
+      });
+    },
     async revision(input: {storyboard:Storyboard;firstPanelId:string;instruction:string;characters:CharacterInput[]}): Promise<RevisionResult> {
       if (!input.instruction.trim()) throw new AIError('invalid_input','Revision instruction is required.');
       const parsed = storyboardSchema.safeParse(input.storyboard);
@@ -197,10 +209,10 @@ export function createAIService(options: AIOptions = {}) {
       for (const c of input.characters) if (!input.references.some(r => r.id === c.id && r.role === 'approved character')) throw new AIError('invalid_input', `Missing approved reference for ${c.id}.`);
       return image(fill(prompt('panel-render','Template'),{style_rules:input.styleRules,panel_spec:input.panelSpec,scene_before:input.sceneBefore,character_anchors:input.characters,reference_manifest:manifest(input.references)}),input.references);
     },
-    async editPanel(input: {change:string;preserve:string;references:Reference[]}): Promise<Buffer> {
+    async editPanel(input: {change:string;mode?:'cosmetic'|'restore';preserve:string;references:Reference[]}): Promise<Buffer> {
       checkReferences(input.references);
       if (input.references[0].role !== 'target panel') throw new AIError('invalid_input','The target panel must be the first image reference.');
-      return image(fill(prompt('targeted-art-edit','Template'),{change_request:input.change,preserve_constraints:input.preserve,reference_manifest:manifest(input.references)}),input.references);
+      return image(fill(prompt('targeted-art-edit','Template'),{change_request:input.change,edit_mode:input.mode ?? 'cosmetic',preserve_constraints:input.preserve,reference_manifest:manifest(input.references)}),input.references);
     }
   };
 }

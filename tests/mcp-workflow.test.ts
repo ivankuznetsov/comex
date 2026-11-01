@@ -26,7 +26,18 @@ test('a client follows the shared guided workflow through queued fake-provider o
     async visualJudge(){providerCalls++;return {outcome:'findings',findings:[finding]};},
     async revision(input:{storyboard:{bible:unknown;pages:{panels:Record<string,unknown>[]}[]}}){providerCalls++;return {earliest_affected_panel_id:'p1',explanation:'Keep the key',revised_bible:input.storyboard.bible,revised_suffix:[{...input.storyboard.pages[0].panels[0],action:'Keep the key'}]};},
   }) as unknown as ReturnType<typeof import('../src/lib/ai/service').createAIService>;
-  const service=createComicService({repository:store,assets:{async read(id){const bytes=files.get(id);if(!bytes)throw new Error('missing');return bytes;},async save(bytes){const id=randomUUID();files.set(id,bytes);return id;},async discard(id){files.delete(id);}},provider,budgetFetch:async()=>{throw new Error('unexpected provider network');},id:randomUUID});
+  const dependencies={repository:store,assets:{async read(id:string){const bytes=files.get(id);if(!bytes)throw new Error('missing');return bytes;},async save(bytes:Buffer){const id=randomUUID();files.set(id,bytes);return id;},async discard(id:string){files.delete(id);}},provider,budgetFetch:async()=>{throw new Error('unexpected provider network');},id:randomUUID};
+  const service=createComicService(dependencies);
+  function durableEditService() {
+    const checkpoints=new Map<string,unknown>(),imageIds=new Map<string,string>();
+    const durable={
+      async load(key:string){return checkpoints.get(key) ?? null;},
+      async checkpoint(key:string,work:(repository:LocalStore)=>Promise<unknown>){if(checkpoints.has(key))return checkpoints.get(key);const value=await work(store);checkpoints.set(key,value);return value;},
+      async paid(step:{id:string},invoke:(fetch:typeof dependencies.budgetFetch)=>Promise<unknown>){const value=await invoke(dependencies.budgetFetch);if(Buffer.isBuffer(value))imageIds.set(step.id,await dependencies.assets.save(value));return value;},
+      async assetIdFor(step:string){return imageIds.get(step) ?? null;},
+    };
+    return createComicService({...dependencies,durable} as any);
+  }
   type Job={id:string;owner:string;request:OperationRequest;status:'queued'|'succeeded'|'failed';result?:unknown;error?:string};
   const jobs=new Map<string,Job>(), keys=new Map<string,{id:string;input:string}>();
   async function run(job:Job) {
@@ -40,7 +51,7 @@ test('a client follows the shared guided workflow through queued fake-provider o
       planStory:()=>service.planStory(owner,id,{},expectedRevision),approveStory:()=>service.approveStory(owner,id,{revision:expectedRevision,storyRevision:input.storyRevision,fingerprint:input.fingerprint},expectedRevision),
       acceptStoryReview:()=>service.acceptStoryReview(owner,id,{fingerprint:input.fingerprint},expectedRevision),
       generatePage:()=>service.generatePage(owner,id,String(input.pageId),{},expectedRevision),acceptPanel:()=>service.acceptPanel(owner,id,String(input.panelId),{assetId:input.assetId,storyRevision:input.storyRevision,panelRevision:input.panelRevision},expectedRevision),
-      editPanel:()=>service.editPanel(owner,id,String(input.panelId),'decision' in input ? {proposalId:input.proposalId,decision:input.decision} : {instruction:input.instruction,assetId:input.assetId,storyRevision:input.storyRevision,panelRevision:input.panelRevision},expectedRevision),
+      editPanel:()=>durableEditService().editPanel(owner,id,String(input.panelId),'decision' in input ? {proposalId:input.proposalId,decision:input.decision} : {instruction:input.instruction,assetId:input.assetId,storyRevision:input.storyRevision,panelRevision:input.panelRevision},expectedRevision),
       exportPage:async()=>({bytes:(await service.downloadPage(owner,id,String(input.pageId),expectedRevision)).length}),
       publish:()=>service.publish(owner,id,{title:input.title,creator:input.creator},expectedRevision),
       withdraw:async()=>{if((await service.getPublished(id)).comic.editionId!==input.expectedEditionId) throw {code:'conflict'};return service.withdraw(owner,id,{},expectedRevision);},

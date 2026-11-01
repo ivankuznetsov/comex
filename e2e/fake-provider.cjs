@@ -44,7 +44,14 @@ globalThis.fetch = async (input, init) => {
     const id = payload.characters[0].id;
     output = {bible:{premise:payload.plot,setting:'London',rules:['Mina carries the key'],character_ids:[id]},pages:Array.from({length:payload.pageCount},(_,i) => ({index:i+1,panels:Array.from({length:payload.panelsPerPage},(_,j) => ({id:`panel-${i+1}-${j+1}`,index:j+1,character_ids:[id],action:`Mina moves through scene ${i+1}-${j+1}`,framing:'wide',dialogue:[],state_before:state,state_after:state}))}))};
   } else if (name === 'narrative_judgment' || name === 'visual_judgment') output = {outcome:'pass',findings:[]};
-  else if (name === 'edit_intent') output = {intent:'artwork',reason:'Colour only'};
+  else if (name === 'edit_intent') {
+    if (typeof raw === 'string') output = {intent:'artwork',reason:'Colour only'};
+    else {
+      const instruction=payload.instruction;
+      const intent=instruction.includes('E2E_STORY') ? 'story' : instruction.includes('E2E_CLARIFY') && !instruction.includes('Clarification:') ? 'clarify' : instruction.includes('E2E_RESTORE') || instruction.includes('Clarification:') ? 'restore' : 'cosmetic';
+      output={intent,reason:'Fake provider route',question:intent==='clarify' ? 'What should be restored?' : null};
+    }
+  }
   else if (name === 'plot_revision') {
     const panels = payload.current_beats_and_states.flatMap(page => page.panels);
     const index = panels.findIndex(panel => panel.id === payload.requested_start);

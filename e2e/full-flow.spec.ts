@@ -63,6 +63,22 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByRole('button', {name:'Apply artwork edit (AI call)'}).click();
   await expect.poll(async () => page.getByRole('img', {name:'Page 1, panel 1'}).getAttribute('src')).not.toBe(panel1Before);
   await expect(page.getByRole('img', {name:'Page 1, panel 2'})).toHaveAttribute('src', panel2Before!);
+  const firstEdit = await page.getByRole('img', {name:'Page 1, panel 1'}).getAttribute('src');
+  await page.getByLabel('Edit artwork').fill('E2E_CLARIFY Fix the lighthouse');
+  await page.getByRole('button',{name:'Apply artwork edit (AI call)'}).click();
+  await page.getByLabel('What should be restored?').fill('Make it dark');
+  await page.getByRole('button',{name:'Continue'}).click();
+  await expect.poll(() => page.getByRole('img',{name:'Page 1, panel 1'}).getAttribute('src')).not.toBe(firstEdit);
+  const beforeStory = await page.getByRole('img',{name:'Page 1, panel 1'}).getAttribute('src');
+  await page.getByLabel('Edit artwork').fill('E2E_STORY Turn on the lighthouse');
+  await page.getByRole('button',{name:'Apply artwork edit (AI call)'}).click();
+  await expect(page.getByText('This may change the story.')).toBeVisible();
+  await page.getByRole('status').filter({hasText:'This may change the story.'}).getByRole('button',{name:'Preview story change'}).click();
+  const routedPreview=page.getByRole('dialog',{name:'Review your story change'});
+  await expect(routedPreview.getByText(/Later pages remain outdated/)).toBeVisible();
+  await routedPreview.getByRole('button',{name:'Close preview'}).click();
+  await expect(page.getByRole('img',{name:'Page 1, panel 1'})).toHaveAttribute('src',beforeStory!);
+
   await page.getByRole('button', {name:'Publish', exact:true}).click();
   await page.getByLabel('Creator display name (optional)').fill('Mina Maker');
   await page.getByRole('button', {name:'Publish comic'}).click();

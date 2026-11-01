@@ -84,9 +84,9 @@ test('story planning returns while its narrative review is still running', async
   } finally {release();await new Promise(resolve=>setTimeout(resolve,20));globalThis.fetch=originalFetch;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.COMEX_MAX_CONCURRENT_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
 
-test('ambiguous artwork edits require a version-bound explicit choice; story changes cannot bypass revision', async () => {
+test('routing restores intended state and returns version-bound story and clarification handoffs', async () => {
   const {mkdtemp,writeFile,rm}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
-  const sharp=(await import('sharp')).default; const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic');
+  const sharp=(await import('sharp')).default; const {createComic,commitPanelRender,acceptPanel,setPageComposition}=await import('@/src/lib/domain/comic');
   const dir=await mkdtemp(join(tmpdir(),'comex-edit-choice-')); const originalFetch=globalThis.fetch;
   process.env.COMEX_ASSET_PATH=dir;process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite');process.env.COMEX_MAX_PROVIDER_CALLS='20';process.env.OPENAI_API_KEY='test';
   try {
@@ -98,39 +98,38 @@ test('ambiguous artwork edits require a version-bound explicit choice; story cha
     const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore;const initial=store.getOwned<any>(comic.id,owner)!;
     let domain=createComic({id:comic.id,ownerId:owner,title:'Light',creatorName:'',plot:'A sailor watches a dark lighthouse',styleId:'ink-manga',pages:[{id:'page1',panels:[{id:'p1',beat:'The lighthouse is dark'}]}]});
     domain=commitPanelRender(domain,owner,'p1',{storyRevision:1,panelRevision:1},image,'uncertain');
+    domain=acceptPanel(domain,owner,'p1',image,1); domain=setPageComposition(domain,owner,'page1','old-composition',[image]);
     const state={location:'lighthouse',time:'night',props:[{key:'lamp',value:'off'}],outfits:[],injuries:[],knowledge:[]};
-    const spec={id:'p1',index:1,character_ids:['mina'],action:'The lighthouse lamp is off',framing:'wide',dialogue:[],state_before:state,state_after:state};
-    const storyboard={bible:{premise:'A dark lighthouse',setting:'coast',rules:[],character_ids:['mina']},pages:[{index:1,panels:[spec]}]};
+    const spec={id:'p1',index:1,character_ids:['mina'],action:'The lighthouse lamp is off',framing:'wide',dialogue:[{speaker_id:'mina',text:'It is dark'}],state_before:state,state_after:state};
+    const storyboard={bible:{premise:'A dark lighthouse',setting:'coast',rules:['Keep lamp off'],character_ids:['mina']},pages:[{index:1,panels:[spec]}]};
     expect(store.update(comic.id,owner,initial.revision,{...initial.data,...domain,storyboard,characters:[{id:'mina',name:'Mina',role:'sailor',appearance:'hair',outfit:'coat',approved:true,referenceAssetId:ref}]})).toBe(true);
+    let unapprovedCalls=0;globalThis.fetch=(async()=>{unapprovedCalls++;throw new Error('Unexpected provider call');}) as unknown as typeof fetch;
+    expect((await post(`comics/${comic.id}/panels/p1/edit`,{instruction:'Turn the lamp off',assetId:image,storyRevision:1,panelRevision:2},cookie)).status).toBe(409);expect(unapprovedCalls).toBe(0);
     await approveSeededStory(comic.id,cookie);
-    let classes=0, images=0, classifyAs:'uncertain'|'story'|'artwork'='uncertain';
+    let classes=0,images=0,previewCalls=0,imagePrompt='',classifyAs:'restore'|'story'|'clarify'='restore';
     globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{
-      if(String(url).includes('/images/')) {images++; return Response.json({data:[{b64_json:png.toString('base64')}]});}
+      if(String(url).includes('/images/')) {images++;imagePrompt=String((init!.body as FormData).get('prompt'));return Response.json({data:[{b64_json:png.toString('base64')}]});}
       const payload=JSON.parse(String(init?.body)), name=payload.text.format.name;
-      if(name==='edit_intent') {classes++;expect(payload.input[0].content).toContain('lighthouse lamp');expect(payload.input[1].content).toContain('The lighthouse lamp is off');}
-      const value=name==='edit_intent'?{intent:classifyAs,reason:'The request may alter the scene.'}:{outcome:'inconclusive',findings:[]};
+      if(name==='edit_intent') {classes++; const evidence=JSON.parse(payload.input[1].content[0].text);expect(evidence.panel).toEqual(spec);expect(evidence.bible).toEqual(storyboard.bible);expect(evidence.reference_manifest).toContain('approved character, ID mina');expect(payload.input[1].content.filter((v:any)=>v.type==='input_image')).toHaveLength(2);}
+      if(name==='plot_revision') previewCalls++;
+      const value=name==='edit_intent'?{intent:classifyAs,reason:'Based on the intended scene.',question:classifyAs==='clarify'?'What should change?':null}:{outcome:'inconclusive',findings:[]};
       return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});
     }) as unknown as typeof fetch;
     const path=`comics/${comic.id}/panels/p1/edit`, version={assetId:image,storyRevision:1,panelRevision:2};
-    const uncertain=await post(path,{instruction:'Turn the lamp off',...version},cookie);expect(uncertain.status).toBe(200);
-    const choice=(await uncertain.json()).editDecision;expect(choice.intent).toBe('uncertain');expect(choice.proposalId).toBeTruthy();expect(images).toBe(0);
-    const choiceView=(await (await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id])).json()).comic;
-    expect(choiceView.pendingArtworkDecision).toMatchObject({id:choice.proposalId,instruction:'Turn the lamp off',reason:'The request may alter the scene.',intent:'uncertain',reviewedVersion:version,choices:['preview_story','artwork_only'],current:true});
-    const confirmed=await post(path,{proposalId:choice.proposalId,decision:'artwork_only'},cookie);expect(confirmed.status).toBe(200);expect(images).toBe(1);expect(classes).toBe(1);
-    const updated=(await confirmed.json()).comic; expect(updated.pages[0].panels[0].reviewVersion.assetId).not.toBe(image);
-    expect(store.getOwned<any>(comic.id,owner)!.data.storyboard).toEqual(storyboard);
-    expect((await post(path,{proposalId:choice.proposalId,decision:'artwork_only'},cookie)).status).toBe(409);expect(images).toBe(1);
-    classifyAs='story';const newVersion=updated.pages[0].panels[0].reviewVersion;
-    const story=await post(path,{instruction:'Give the key to the sailor',...newVersion},cookie);const storyChoice=(await story.json()).editDecision;expect(storyChoice.intent).toBe('story');expect(images).toBe(1);
-    const storyView=(await (await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id])).json()).comic;
-    expect(storyView.pendingArtworkDecision).toMatchObject({id:storyChoice.proposalId,intent:'story',choices:['preview_story'],current:true});
-    expect((await post(path,{proposalId:storyChoice.proposalId,decision:'artwork_only'},cookie)).status).toBe(409);
-    expect((await post(path,{proposalId:crypto.randomUUID(),decision:'artwork_only'},cookie)).status).toBe(409);expect(images).toBe(1);
-    classifyAs='uncertain'; const next=await post(path,{instruction:'Change the lighthouse light',...newVersion},cookie);const pending=(await next.json()).editDecision;
-    const latest=store.getOwned<any>(comic.id,owner)!;const pages=latest.data.pages.map((page:any)=>({...page,panels:page.panels.map((p:any)=>({...p,revision:p.revision+1}))}));
-    expect(store.update(comic.id,owner,latest.revision,{...latest.data,pages})).toBe(true);
-    expect((await post(path,{proposalId:pending.proposalId,decision:'artwork_only'},cookie)).status).toBe(409);
-    expect((await post(`comics/${comic.id}/revisions/preview`,{panelId:'p1',instruction:'Change it',reviewedVersion:newVersion},cookie)).status).toBe(409);expect(images).toBe(1);
+    const restored=await post(path,{instruction:'Turn the lamp off',...version},cookie);expect(restored.status).toBe(200);
+    const result=await restored.json();expect(result.outcome).toBe('edited');expect(result.intent).toBe('restore');expect(images).toBe(1);expect(classes).toBe(1);
+    expect(imagePrompt).toContain('Edit mode: restore');expect(imagePrompt).toContain('intended storyboard facts take precedence');expect(imagePrompt).toContain('The lighthouse lamp is off');
+    const after=store.getOwned<any>(comic.id,owner)!;expect(after.data.storyboard).toEqual(storyboard);expect(after.data.storyRevision).toBe(1);expect(after.data.pages[0].composition).toBeNull();expect(after.data.pages[0].panels[0].acceptance).toBeNull();expect(after.data.pages[0].panels[0].assetId).not.toBe(image);
+    const currentVersion=result.comic.pages[0].panels[0].reviewVersion;
+    classifyAs='story';const story=await post(path,{instruction:'Change the story',...currentVersion,expectedDraftRevision:after.revision},cookie);expect(story.status).toBe(200);
+    const handoff=(await story.json()).routing;expect(handoff.intent).toBe('story');expect(handoff.instruction).toBe('Change the story');expect(handoff.panelId).toBe('p1');expect(handoff.snapshot).toEqual({draftRevision:after.revision,...currentVersion});
+    classifyAs='clarify';const unclear=await post(path,{instruction:'Fix it',...currentVersion,expectedDraftRevision:after.revision},cookie);expect(unclear.status).toBe(200);const question=(await unclear.json()).routing;expect(question.question).toBe('What should change?');expect(images).toBe(1);
+    classifyAs='story';const answered=await post(path,{instruction:'Fix it\n\nClarification: change the story',...currentVersion,expectedDraftRevision:question.snapshot.draftRevision},cookie);expect(answered.status).toBe(200);
+    expect((await answered.json()).routing).toMatchObject({intent:'story',instruction:'Fix it\n\nClarification: change the story',snapshot:question.snapshot});expect(classes).toBe(4);expect(images).toBe(1);
+    const changed=store.getOwned<any>(comic.id,owner)!;expect(store.update(comic.id,owner,changed.revision,{...changed.data,title:'New title'})).toBe(true);
+    const stalePreview=await post(`comics/${comic.id}/revisions/preview`,{panelId:'p1',instruction:handoff.instruction,reviewedVersion:currentVersion,expectedDraftRevision:handoff.snapshot.draftRevision},cookie);expect(stalePreview.status).toBe(409);expect(previewCalls).toBe(0);
+    const staleAnswer=await post(path,{instruction:'Fix it\n\nClarification: make it dark',...currentVersion,expectedDraftRevision:question.snapshot.draftRevision},cookie);expect(staleAnswer.status).toBe(409);expect(classes).toBe(4);expect(images).toBe(1);
+    expect((await post(path,{proposalId:crypto.randomUUID(),decision:'artwork_only'},cookie)).status).toBe(400);
   } finally {globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
 
@@ -822,8 +821,8 @@ test('revision preview names earlier impact and apply preserves frozen prefix', 
 });
 
 test('artwork edit is bound to the viewed panel before and after classification', async () => {
-  const {mkdtemp,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
-  const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic');const sharp=(await import('sharp')).default;
+  const {mkdtemp,writeFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+  const {createComic,commitPanelRender,reviseStory}=await import('@/src/lib/domain/comic');const sharp=(await import('sharp')).default;
   const dir=await mkdtemp(join(tmpdir(),'comex-edit-version-'));const originalFetch=globalThis.fetch;
   process.env.COMEX_ASSET_PATH=dir;process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite');process.env.COMEX_MAX_PROVIDER_CALLS='10';process.env.OPENAI_API_KEY='test';
   let release!:()=>void,started!:()=>void;const gate=new Promise<void>(r=>release=r),began=new Promise<void>(r=>started=r);let textCalls=0,imageCalls=0;
@@ -835,8 +834,8 @@ test('artwork edit is bound to the viewed panel before and after classification'
     const state={location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};const panel={id:'p1',index:1,character_ids:[],action:'First',framing:'wide',dialogue:[],state_before:state,state_after:state};const storyboard={bible:{premise:'Deliver',setting:'town',rules:[],character_ids:[]},pages:[{index:1,panels:[panel]}]};
     expect(store.update(comic.id,owner,current.revision,{...current.data,...draft,storyboard})).toBe(true);
     await approveSeededStory(comic.id,cookie);
-    const png=await sharp({create:{width:8,height:8,channels:4,background:'#fff'}}).png().toBuffer();
-    globalThis.fetch=(async (url:string|URL|Request)=>{if(String(url).includes('/images/')){imageCalls++;return Response.json({data:[{b64_json:png.toString('base64')}]});} textCalls++;started();await gate;return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({intent:'artwork',reason:'lighting'})}]}]});}) as unknown as typeof fetch;
+    const png=await sharp({create:{width:8,height:8,channels:4,background:'#fff'}}).png().toBuffer(); await writeFile(join(dir,`${asset}.png`),png);
+    globalThis.fetch=(async (url:string|URL|Request)=>{if(String(url).includes('/images/')){imageCalls++;return Response.json({data:[{b64_json:png.toString('base64')}]});} textCalls++;started();await gate;return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({intent:'restore',reason:'lighting',question:null})}]}]});}) as unknown as typeof fetch;
     const path=`comics/${comic.id}/panels/p1/edit`;
     const unbound=post(path,{instruction:'Change lighting'},cookie);
     const first=await Promise.race([unbound.then(r=>r.status),began.then(()=>-1)]);
@@ -846,10 +845,91 @@ test('artwork edit is bound to the viewed panel before and after classification'
     expect(textCalls).toBe(0);
     const pending=post(path,{instruction:'Change lighting',assetId:asset,storyRevision:1,panelRevision:2},cookie);await began;
     const latest=store.getOwned<any>(comic.id,owner)!;
-    const pages=latest.data.pages.map((page:any)=>({...page,panels:page.panels.map((p:any)=>({...p,storyRevision:2}))}));
-    expect(store.update(comic.id,owner,latest.revision,{...latest.data,storyRevision:2,pages})).toBe(true);
+    const revised=reviseStory(latest.data,owner,1,'p1',{p1:'Changed beat'});
+    expect(revised.pages[0].panels[0].assetId).toBe(asset);
+    expect(revised.pages[0].panels[0].status).toBe('outdated');
+    expect(store.update(comic.id,owner,latest.revision,revised)).toBe(true);
     release();expect((await pending).status).toBe(409);expect(imageCalls).toBe(0);expect(textCalls).toBe(1);
   } finally {release();globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('classification cannot hand off after a changed whole draft even when the panel version is retained', async () => {
+  const {mkdtemp,writeFile,rm}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
+  const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic'); const sharp=(await import('sharp')).default;
+  const dir=await mkdtemp(join(tmpdir(),'comex-edit-draft-race-')); const originalFetch=globalThis.fetch;
+  process.env.COMEX_ASSET_PATH=dir; process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite'); process.env.COMEX_MAX_PROVIDER_CALLS='10'; process.env.OPENAI_API_KEY='test';
+  let release!:()=>void,started!:()=>void; const gate=new Promise<void>(r=>release=r), began=new Promise<void>(r=>started=r); let imageCalls=0;
+  try {
+    const image='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const png=await sharp({create:{width:8,height:8,channels:4,background:'#fff'}}).png().toBuffer(); await writeFile(join(dir,`${image}.png`),png);
+    const created=await post('comics',{title:'Race',plot:'A lighthouse',style:'ink-manga'}); const {comic}=await created.json(); const cookie=created.headers.get('set-cookie')!.split(';')[0], owner=cookie.split('=')[1];
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore; const initial=store.getOwned<any>(comic.id,owner)!;
+    let draft=createComic({id:comic.id,ownerId:owner,title:'Race',creatorName:'',plot:'A lighthouse',styleId:'ink-manga',pages:[{id:'page1',panels:[{id:'p1',beat:'Lamp is off'}]}]});
+    draft=commitPanelRender(draft,owner,'p1',{storyRevision:1,panelRevision:1},image,'pass');
+    const state={location:'coast',time:'night',props:[{key:'lamp',value:'off'}],outfits:[],injuries:[],knowledge:[]};
+    const spec={id:'p1',index:1,character_ids:[],action:'Lamp is off',framing:'wide',dialogue:[],state_before:state,state_after:state};
+    const storyboard={bible:{premise:'Dark lighthouse',setting:'coast',rules:[],character_ids:[]},pages:[{index:1,panels:[spec]}]};
+    expect(store.update(comic.id,owner,initial.revision,{...initial.data,...draft,storyboard})).toBe(true);
+    await approveSeededStory(comic.id,cookie);
+    globalThis.fetch=(async (url:string|URL|Request)=>{if(String(url).includes('/images/')) {imageCalls++;throw new Error('Unexpected image');} started();await gate;return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({intent:'story',reason:'Changes story',question:null})}]}]});}) as unknown as typeof fetch;
+    const pending=post(`comics/${comic.id}/panels/p1/edit`,{instruction:'Turn it on',assetId:image,storyRevision:1,panelRevision:2},cookie); await began;
+    const current=store.getOwned<any>(comic.id,owner)!;
+    expect(store.update(comic.id,owner,current.revision,{...current.data,title:'Edited elsewhere'})).toBe(true);
+    release(); expect((await pending).status).toBe(409); expect(imageCalls).toBe(0);
+  } finally {release();globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('an edit rendering after a draft write is discarded, and a lost classifier response is not retried', async () => {
+  const {mkdtemp,writeFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+  const sharp=(await import('sharp')).default;const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic');
+  const dir=await mkdtemp(join(tmpdir(),'comex-edit-commit-race-'));const originalFetch=globalThis.fetch;
+  process.env.COMEX_ASSET_PATH=dir;process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite');process.env.COMEX_MAX_PROVIDER_CALLS='20';process.env.OPENAI_API_KEY='test';
+  let release!:()=>void,started!:()=>void;const gate=new Promise<void>(r=>release=r),began=new Promise<void>(r=>started=r);let images=0,classes=0,failClassification=false;
+  try {
+    const png=await sharp({create:{width:8,height:8,channels:4,background:'#fff'}}).png().toBuffer();const asset='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';await writeFile(join(dir,`${asset}.png`),png);
+    const created=await post('comics',{title:'Race',plot:'A lighthouse',style:'ink-manga'});const {comic}=await created.json();const cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore;const initial=store.getOwned<any>(comic.id,owner)!;
+    let draft=createComic({id:comic.id,ownerId:owner,title:'Race',creatorName:'',plot:'A lighthouse',styleId:'ink-manga',pages:[{id:'page1',panels:[{id:'p1',beat:'Dark'}]}]});draft=commitPanelRender(draft,owner,'p1',{storyRevision:1,panelRevision:1},asset,'pass');
+    const state={location:'coast',time:'night',props:[],outfits:[],injuries:[],knowledge:[]};const panel={id:'p1',index:1,character_ids:[],action:'Dark',framing:'wide',dialogue:[],state_before:state,state_after:state};const storyboard={bible:{premise:'Lighthouse',setting:'coast',rules:[],character_ids:[]},pages:[{index:1,panels:[panel]}]};
+    expect(store.update(comic.id,owner,initial.revision,{...initial.data,...draft,storyboard})).toBe(true);
+    await approveSeededStory(comic.id,cookie);
+    globalThis.fetch=(async (url:string|URL|Request)=>{if(String(url).includes('/images/')){images++;started();await gate;return Response.json({data:[{b64_json:png.toString('base64')}]});}classes++;if(failClassification) throw new Error('connection lost');return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({intent:'restore',reason:'Repair',question:null})}]}]});}) as unknown as typeof fetch;
+    const body={instruction:'Make it dark',assetId:asset,storyRevision:1,panelRevision:2},path=`comics/${comic.id}/panels/p1/edit`;
+    const pending=post(path,body,cookie);await began;const current=store.getOwned<any>(comic.id,owner)!;
+    const concurrentText=store.reserveTextOperation(comic.id,owner,current.revision);
+    if (concurrentText) store.finishTextOperation(comic.id,owner,false);
+    const concurrentPage=store.beginPageJob(comic.id,owner,'page1',crypto.randomUUID(),current.revision);
+    if (concurrentPage) store.finishPageJob(concurrentPage.job.id,owner,'failed',null);
+    expect(concurrentText).toBe(false);expect(concurrentPage).toBeNull();
+    expect(store.update(comic.id,owner,current.revision,{...current.data,title:'Edited elsewhere'})).toBe(true);release();expect((await pending).status).toBe(409);
+    expect(store.getOwned<any>(comic.id,owner)!.data.pages[0].panels[0].assetId).toBe(asset);expect(images).toBe(1);
+    failClassification=true;const uncertain=await post(path,body,cookie);expect(uncertain.status).toBe(502);expect((await post(path,body,cookie)).status).toBe(409);expect(classes).toBe(2);expect(images).toBe(1);
+  } finally {release();globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('an uncertain edit image retains the panel reservation without poisoning the text reservation', async () => {
+  const {mkdtemp,writeFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+  const sharp=(await import('sharp')).default;const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic');
+  const dir=await mkdtemp(join(tmpdir(),'comex-edit-image-unknown-'));const originalFetch=globalThis.fetch;
+  process.env.COMEX_ASSET_PATH=dir;process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite');process.env.COMEX_MAX_PROVIDER_CALLS='10';process.env.COMEX_MAX_CONCURRENT_CALLS='4';process.env.OPENAI_API_KEY='test';
+  try {
+    const png=await sharp({create:{width:8,height:8,channels:4,background:'#fff'}}).png().toBuffer();const asset='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';await writeFile(join(dir,`${asset}.png`),png);
+    const created=await post('comics',{title:'Unknown edit',plot:'A lighthouse',style:'ink-manga'});const {comic}=await created.json();const cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore;const initial=store.getOwned<any>(comic.id,owner)!;
+    let draft=createComic({id:comic.id,ownerId:owner,title:'Unknown edit',creatorName:'',plot:'A lighthouse',styleId:'ink-manga',pages:[{id:'page1',panels:[{id:'p1',beat:'Dark'}]}]});draft=commitPanelRender(draft,owner,'p1',{storyRevision:1,panelRevision:1},asset,'pass');
+    const state={location:'coast',time:'night',props:[],outfits:[],injuries:[],knowledge:[]};const panel={id:'p1',index:1,character_ids:[],action:'Dark',framing:'wide',dialogue:[],state_before:state,state_after:state};const storyboard={bible:{premise:'Lighthouse',setting:'coast',rules:[],character_ids:[]},pages:[{index:1,panels:[panel]}]};
+    expect(store.update(comic.id,owner,initial.revision,{...initial.data,...draft,storyboard})).toBe(true);
+    await approveSeededStory(comic.id,cookie);
+    let images=0,classes=0;globalThis.fetch=(async (url:string|URL|Request)=>{if(String(url).includes('/images/')) {images++;throw new Error('image response lost');}classes++;return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({intent:'restore',reason:'Repair',question:null})}]}]});}) as unknown as typeof fetch;
+    const body={instruction:'Make it dark',assetId:asset,storyRevision:1,panelRevision:2},path=`comics/${comic.id}/panels/p1/edit`;
+    expect((await post(path,body,cookie)).status).toBe(502);
+    const current=store.getOwned<any>(comic.id,owner)!;expect(current.data.operations['panel:p1']).toBe('unknown_outcome');
+    expect(store.reserveTextOperation(comic.id,owner,current.revision)).toBe(true);store.finishTextOperation(comic.id,owner,false);
+    expect((await post(path,body,cookie)).status).toBe(409);expect(images).toBe(1);expect(classes).toBe(1);
+  } finally {globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.COMEX_MAX_CONCURRENT_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
 
 test('artwork edit replaces only the selected panel and preserves story beats', async () => {
@@ -865,7 +945,7 @@ test('artwork edit replaces only the selected panel and preserves story beats', 
     const state={location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};const panel=(id:string,index:number)=>({id,index,character_ids:['mina'],action:id,framing:'wide',dialogue:[],state_before:state,state_after:state});const storyboard={bible:{premise:'Delivery',setting:'town',rules:[],character_ids:['mina']},pages:[{index:1,panels:[panel('p1',1),panel('p2',2)]}]};
     expect(store.update(comic.id,owner,current.revision,{...current.data,...domain,storyboard,characters:[{id:'mina',name:'Mina',role:'courier',appearance:'hair',outfit:'coat',approved:true,referenceAssetId:ids[0]}]})).toBe(true);
     await approveSeededStory(comic.id,cookie);
-    globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{if(String(url).includes('/images/'))return Response.json({data:[{b64_json:png.toString('base64')}]});const name=JSON.parse(String(init?.body)).text.format.name;const value=name==='edit_intent'?{intent:'artwork',reason:'Change light only'}:{outcome:'inconclusive',findings:[]};return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});}) as unknown as typeof fetch;
+    globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{if(String(url).includes('/images/'))return Response.json({data:[{b64_json:png.toString('base64')}]});const name=JSON.parse(String(init?.body)).text.format.name;const value=name==='edit_intent'?{intent:'cosmetic',reason:'Change light only',question:null}:{outcome:'inconclusive',findings:[]};return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});}) as unknown as typeof fetch;
     const result=await post(`comics/${comic.id}/panels/p2/edit`,{instruction:'Change the lighting',assetId:ids[2],storyRevision:1,panelRevision:2},cookie);expect(result.status).toBe(200);
     const final=store.getOwned<{storyRevision:number,pages:{panels:{assetId:string,beat:string}[]}[]}>(comic.id,owner)!.data;expect(final.storyRevision).toBe(1);expect(final.pages[0].panels[0].assetId).toBe(ids[1]);expect(final.pages[0].panels[1].assetId).not.toBe(ids[2]);expect(final.pages[0].panels[1].beat).toBe('Departs');
   } finally {globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
@@ -963,7 +1043,7 @@ test('a visual blocker remains visible without stopping later panels', async () 
     globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{
       if(String(url).includes('/images/')){images++;return Response.json({data:[{b64_json:png.toString('base64')}]});}
       const name=JSON.parse(String(init?.body)).text.format.name;
-      const value=name==='edit_intent' ? {intent:'artwork',reason:'Visual correction'} : ++reviews===1 ? {outcome:'findings',findings:[{severity:'blocker',dimension:'identity',panel_id:'p1',character_id:'mina',reference_id:'mina',expected:'coat',observed:'wrong coat',repair:'fix coat'}]} : {outcome:'inconclusive',findings:[]};
+      const value=name==='edit_intent' ? {intent:'cosmetic',reason:'Visual correction',question:null} : ++reviews===1 ? {outcome:'findings',findings:[{severity:'blocker',dimension:'identity',panel_id:'p1',character_id:'mina',reference_id:'mina',expected:'coat',observed:'wrong coat',repair:'fix coat'}]} : {outcome:'inconclusive',findings:[]};
       return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});
     }) as unknown as typeof fetch;
     const first=await post(`comics/${comic.id}/pages/page1/generate`,{},cookie); expect(first.status).toBe(200);
@@ -983,7 +1063,7 @@ test('narrative findings remain visible without blocking page generation', async
     const state={location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};const spec={id:'p1',index:1,character_ids:['mina'],action:'First',framing:'wide',dialogue:[],state_before:state,state_after:state};const storyboard={bible:{premise:'A story',setting:'town',rules:[],character_ids:['mina']},pages:[{index:1,panels:[spec]}]};
     expect(store.update(comic.id,owner,original.revision,{...original.data,...domain,storyboard,storyReview:{outcome:'findings',findings:[{severity:'blocker',dimension:'story',observed:'impossible ending'}]},characters:[{id:'mina',name:'Mina',role:'courier',appearance:'hair',outfit:'coat',approved:true,referenceAssetId:ref}]})).toBe(true);
     await approveSeededStory(comic.id,cookie);
-    globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{calls++;if(String(url).includes('/images/'))return Response.json({data:[{b64_json:png.toString('base64')}]});const name=JSON.parse(String(init?.body)).text.format.name;const value=name==='edit_intent'?{intent:'artwork',reason:'Lighting'}:{outcome:'inconclusive',findings:[]};return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});}) as unknown as typeof fetch;
+    globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{calls++;if(String(url).includes('/images/'))return Response.json({data:[{b64_json:png.toString('base64')}]});const name=JSON.parse(String(init?.body)).text.format.name;const value=name==='edit_intent'?{intent:'cosmetic',reason:'Lighting',question:null}:{outcome:'inconclusive',findings:[]};return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(value)}]}]});}) as unknown as typeof fetch;
     const generate=await post(`comics/${comic.id}/pages/page1/generate`,{},cookie);expect(generate.status).toBe(200);expect(calls).toBeGreaterThanOrEqual(1);
     await waitForComic(comic.id,cookie,c=>c.pages[0].panels[0].reviewOutcome==='inconclusive');
     const review=await (await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id])).json();
