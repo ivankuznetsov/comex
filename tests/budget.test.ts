@@ -124,3 +124,13 @@ test('abandoned reservations require explicit reconciliation and retain their co
   expect(()=>operator.resolveUnknown(id)).toThrow();
   operator.close(); rmSync(dir,{recursive:true,force:true});
 });
+
+test('provider steps are reserved once across reopened SQLite connections', () => {
+  const {dir,path}=db(); const config={maxCalls:4,maxConcurrent:2};
+  const first=new ProviderBudget(path,config),second=new ProviderBudget(path,config);
+  try {
+    const reservation=first.reserve('job:step'); first.finish(reservation,'completed');
+    expect(()=>second.reserve('job:step')).toThrow('already has a reservation');
+    expect(second.summary()).toEqual({used:1,active:0,unknown:0});
+  } finally {first.close();second.close();rmSync(dir,{recursive:true,force:true});}
+});
