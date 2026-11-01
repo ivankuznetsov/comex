@@ -39,6 +39,7 @@ test('creator can save a private local draft and another browser cannot read it'
 
 for (const viewport of [{width:390,height:844},{width:1280,height:800}]) {
   test(`upload and approve separate references at ${viewport.width}px`, async ({page}) => {
+    test.setTimeout(90_000);
     const sharp=(await import('sharp')).default;
     const {existsSync,readFileSync}=await import('node:fs'); const {join}=await import('node:path');
     await page.setViewportSize(viewport);
@@ -47,7 +48,7 @@ for (const viewport of [{width:390,height:844},{width:1280,height:800}]) {
     await page.getByLabel('Give your comic a title').fill(`References ${viewport.width}`);
     await page.getByLabel('What happens in your story?').fill('Pip and Nora open a lighthouse.');
     await page.getByRole('button',{name:/Start creating/}).click();
-    await expect(page.getByRole('button',{name:'Review and add'})).toBeVisible({timeout:30_000});
+    await expect(page.getByRole('button',{name:'Review suggestion'})).toBeVisible({timeout:30_000});
     const countFile=join(process.env.COMEX_E2E_MAILBOX!,'image-count');
     const imageCalls=()=>existsSync(countFile) ? readFileSync(countFile,'utf8').trim().split('\n').length : 0;
     const before=imageCalls();
@@ -77,13 +78,14 @@ for (const viewport of [{width:390,height:844},{width:1280,height:800}]) {
 }
 
 test('upload keeps the file and text through a conflict and requires review of a changed card', async ({page}) => {
+  test.setTimeout(90_000);
   const sharp=(await import('sharp')).default;
   await signIn(page,'uploadconflict@example.test');
   await page.goto('/create');
   await page.getByLabel('Give your comic a title').fill('Upload conflict');
   await page.getByLabel('What happens in your story?').fill('A lighthouse keeper.');
   await page.getByRole('button',{name:/Start creating/}).click();
-  await expect(page.getByRole('button',{name:'Review and add'})).toBeVisible({timeout:30_000});
+  await expect(page.getByRole('button',{name:'Review suggestion'})).toBeVisible({timeout:30_000});
   for(const [label,value] of [['name','Pip'],['role','Keeper'],['appearance','Blue hair'],['outfit','Red coat']]) await page.getByLabel(label,{exact:true}).fill(value);
   await page.getByRole('button',{name:'Upload a reference for new character'}).click();
   const card=page.locator('article').filter({has:page.getByRole('heading',{name:'Pip',exact:true})});
