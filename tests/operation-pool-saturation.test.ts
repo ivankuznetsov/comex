@@ -15,6 +15,7 @@ beforeAll(async()=>{
   await setup.query(await readFile('db/migrations/001_hosted_storage.sql','utf8'));
   await setup.query(await readFile('db/migrations/002_mcp_grants.sql','utf8'));
   await setup.query(await readFile('db/migrations/003_operations.sql','utf8'));
+  await setup.query(await readFile('db/migrations/006_provider_costs.sql','utf8'));
   await setup.query('CREATE TABLE "session" (id text PRIMARY KEY,token text,"userId" text,"expiresAt" timestamptz,"updatedAt" timestamptz)');
   for(const id of ['1','2']) {
     await setup.query('INSERT INTO "session"(id,token,"userId","expiresAt","updatedAt") VALUES ($1,$2,$3,now()+interval \'1 hour\',now())',[`s${id}`,`token${id}`,'u']);

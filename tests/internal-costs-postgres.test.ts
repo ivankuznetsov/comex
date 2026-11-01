@@ -1,0 +1,47 @@
+import {afterAll,beforeAll,expect,test} from 'bun:test';
+import {randomUUID} from 'node:crypto';
+import {Pool} from 'pg';
+import {applyMigrations} from '../src/lib/storage/postgres';
+import {PostgresOperationRepository} from '../src/lib/operations/postgres';
+import {PostgresOperationCoordinator} from '../src/lib/operations/coordinator';
+import {PostgresPaidGateway} from '../src/lib/operations/paid-gateway';
+import {createAIService,type AIOptions} from '../src/lib/ai/service';
+const pgTest=process.env.TEST_DATABASE_URL?test:test.skip,schema=`comex_cost_${randomUUID().replaceAll('-','')}`;
+let admin:Pool,pool:Pool,repo:PostgresOperationRepository,coordinator:PostgresOperationCoordinator;
+beforeAll(async()=>{
+ if(!process.env.TEST_DATABASE_URL)return;
+ admin=new Pool({connectionString:process.env.TEST_DATABASE_URL});await admin.query(`CREATE SCHEMA "${schema}"`);
+ pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,options:`-c search_path=${schema}`});await applyMigrations(pool);
+ repo=new PostgresOperationRepository(pool,{maxCalls:10,maxConcurrent:1});coordinator=new PostgresOperationCoordinator(pool,repo);
+ await pool.query(`INSERT INTO "user"(id,name,email,"emailVerified") VALUES ('u','User','u@example.test',true)`);
+ await pool.query(`INSERT INTO "session"(id,token,"userId","expiresAt","updatedAt") VALUES ('s','token','u',now()+interval '1 hour',now())`);
+ await pool.query("INSERT INTO mcp_grants(id,owner,client_id,session_id,user_id,client_name,created_at) VALUES ('g','owner','c','s','u','Client',1)");
+ await pool.query("INSERT INTO comics(id,owner,revision,draft) VALUES ('comic','owner',1,$1)",[JSON.stringify({title:'Cost test',ownerId:'owner',storyRevision:1,pages:[]})]);
+});
+afterAll(async()=>{await pool?.end();if(admin){await admin.query(`DROP SCHEMA "${schema}" CASCADE`);await admin.end();}});
+pgTest('Postgres records a priced call once, replays without charge, and exposes only an internal aggregate',async()=>{
+ const ticket=await coordinator.enqueue({identity:{actor:'owner',grantId:'g',scopes:['comex:write','comex:generate']},action:'initialQuestions',requestKey:'cost-call',comicId:'comic',expectedRevision:1,input:{}});
+ const lease=(await repo.claimOperation(ticket.id,300000))!;let calls=0;
+ const gateway=new PostgresPaidGateway(pool,repo,{save:async()=>{throw Error('No asset expected');},read:async()=>{throw Error('No asset expected');}},async()=>{calls++;return Response.json({status:'completed',model:'gpt-6.1-terra',usage:{input_tokens:1000,output_tokens:500},output:[{content:[{type:'output_text',text:'{"questions":[]}'}]}]});});
+ const request={lease,owner:'owner',step:{id:'initial/questions',input:{plot:'Trip'}},expectedRevision:1};
+ const invoke=(fetch:NonNullable<AIOptions['fetch']>)=>createAIService({apiKey:'test-only',textModel:'gpt-6.1-terra',fetch}).questions({plot:'Trip',style:'ink',answers:{},limit:5});
+ expect(await gateway.run(request,invoke)).toEqual([]);expect(await gateway.run(request,invoke)).toEqual([]);expect(calls).toBe(1);
+ const rows=(await pool.query('SELECT * FROM provider_costs')).rows;expect(rows).toHaveLength(1);expect(rows[0].comic_id).toBe('comic');expect(rows[0].operation_id).toBe(ticket.id);expect(rows[0].cost_state).toBe('priced');expect(Number(rows[0].cost_usd)).toBe(0.0035);
+ const summary=(await pool.query('SELECT * FROM comic_cost_totals')).rows[0];expect(summary.tracked_requests).toBe(1);expect(summary.unpriced_requests).toBe(0);expect(Number(summary.recorded_cost_usd)).toBe(0.0035);
+ await repo.finishOperation(lease,'succeeded',null);
+});
+
+pgTest('cost metadata writes cannot move dispatch beyond the final lease expiry check',async()=>{
+ const ticket=await coordinator.enqueue({identity:{actor:'owner',grantId:'g',scopes:['comex:write','comex:generate']},action:'initialQuestions',requestKey:'cost-expiry',comicId:'comic',expectedRevision:1,input:{}});
+ const lease=(await repo.claimOperation(ticket.id,300000))!;let calls=0;
+ const delayed=new Proxy(pool,{get(target,key){
+  if(key==='connect')return async()=>{const client=await target.connect();return new Proxy(client,{get(c,k){
+   if(k==='query')return async(sql:string,params:unknown[])=>{const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO provider_costs'))await c.query('UPDATE operations SET lease_until=0 WHERE id=$1',[ticket.id]);return result;};
+   const value=Reflect.get(c,k,c);return typeof value==='function'?value.bind(c):value;
+  }});};
+  const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+ }}) as Pool;
+ const gateway=new PostgresPaidGateway(delayed,repo,{save:async()=>'',read:async()=>Buffer.alloc(0)},async()=>{calls++;return Response.json({});});
+ await expect(gateway.run({lease,owner:'owner',step:{id:'expired',input:{}},expectedRevision:1},async fetch=>(await fetch('https://api.openai.com/v1/responses',{body:JSON.stringify({model:'gpt-6.1-terra'})})).json())).rejects.toMatchObject({code:'lease_lost'});
+ expect(calls).toBe(0);expect((await pool.query('SELECT 1 FROM provider_costs WHERE operation_id=$1',[ticket.id])).rowCount).toBe(0);
+});

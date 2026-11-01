@@ -5,7 +5,7 @@ export const resultSchema=z.object({
   status:z.enum(['ok','queued','running','succeeded','needs_review','failed','unknown_outcome','obsolete','revoked','error']),
   message:z.string(), data:z.record(z.string(),z.unknown()).nullable(), error:z.object({code:z.string(),nextStep:z.string()}).strict().nullable(),
 }).strict();
-const forbiddenKeys=/^(owner|ownerId|actor|grantId|token|accessToken|refreshToken|secret|clientSecret|authorization|cookie|apiKey|prompt|providerPrompt|providerPrompts|systemPrompt|providerRequest|providerResponse|rawRequest|credentials|authInfo)$/i;
+const forbiddenKeys=/^(owner|ownerId|actor|grantId|token|accessToken|refreshToken|secret|clientSecret|authorization|cookie|apiKey|prompt|providerPrompt|providerPrompts|systemPrompt|providerRequest|providerResponse|rawRequest|credentials|authInfo|costEstimate|providerCosts|costLedger)$/i;
 /** Shared views should already omit secrets. Filter again at the protocol boundary. */
 export function safeResult(value:unknown, identity:McpIdentity, authorization:string | null):unknown {
   const token=authorization?.match(/^Bearer\s+(.+)$/i)?.[1];

@@ -1,3 +1,4 @@
+import {recordCostReceipt} from './cost-ledger';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -73,6 +74,7 @@ export function createAIService(options: AIOptions = {}) {
       let providerCode = '', limitDetails = '';
       try {
         const body = await response.json() as {error?: {code?: unknown; message?: unknown}};
+        await recordCostReceipt(response,body);
         if (typeof body.error?.code === 'string' && ['insufficient_quota', 'rate_limit_exceeded', 'billing_hard_limit_reached', 'credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded', 'organization_usage_limit_exceeded', 'slow_down'].includes(body.error.code)) providerCode = `: ${body.error.code}`;
         if (body.error?.code === 'rate_limit_exceeded' && typeof body.error.message === 'string') {
           for (const field of ['limit', 'used', 'requested', 'current']) {
@@ -88,6 +90,7 @@ export function createAIService(options: AIOptions = {}) {
     let result: unknown;
     try {
       result = await response.json();
+      await recordCostReceipt(response,result);
       if (path === 'responses') observeSafely(options.observeResponse,result,performance.now()-started);
       if (path.startsWith('images/')) {
         const encoded = (result as {data?:{b64_json?:string}[]})?.data?.[0]?.b64_json;

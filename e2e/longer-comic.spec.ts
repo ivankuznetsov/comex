@@ -11,20 +11,17 @@ test('creator chooses five pages, draws and publishes all five',async({page})=>{
   await expect(page).toHaveURL(/\/comics\//,{timeout:90_000});
   await expect(page.getByRole('button',{name:'Review suggestion'})).toBeVisible({timeout:30_000});
   await expect(page.getByLabel('Pages',{exact:true})).toHaveValue('3');
-  const budget=page.getByRole('region',{name:'Estimated budget'});
-  await expect(budget).toContainText('3 pages · 9 panels · 0 character references');
-  await expect(budget).toContainText('USD');
+  await expect(page.getByRole('region',{name:'Estimated budget'})).toHaveCount(0);
+  const read=await page.request.get('/api/comics/'+page.url().split('/').pop());
+  expect(await read.json()).not.toHaveProperty('comic.costEstimate');
   await page.getByLabel('Pages',{exact:true}).selectOption('5');
   await expect(page.getByLabel('Pages',{exact:true})).toHaveValue('5');
-  await expect(budget).toContainText('5 pages · 15 panels');
   await expect(page.getByLabel('Panels per page')).toBeEnabled();
   await page.getByLabel('Panels per page').selectOption('2');
   await expect(page.getByRole('button',{name:'Review suggestion'})).toBeEnabled();
   await page.getByRole('button',{name:'Review suggestion'}).click();
   await page.getByRole('button',{name:'Add character',exact:true}).click();
   await expect(page.getByAltText('Reference for Mina')).toBeVisible();
-  await expect(budget).toContainText('5 pages · 10 panels · 1 character reference');
-  await expect(budget).toContainText('10 panels and 0 references left to draw');
   await page.getByRole('button',{name:'Approve',exact:true}).click();
   await page.reload();
   await expect(page.getByLabel('Pages',{exact:true})).toHaveValue('5');
@@ -38,7 +35,6 @@ test('creator chooses five pages, draws and publishes all five',async({page})=>{
     await expect(page.getByRole('img',{name:`Page ${i}, panel 2`})).toBeVisible({timeout:40_000});
     await expect(page.getByRole('link',{name:'Download page'})).toBeVisible();
   }
-  await expect(budget).toContainText('Estimated remaining: $0.00');
   await page.getByRole('button',{name:'Publish',exact:true}).click();
   await page.getByRole('button',{name:'Publish comic',exact:true}).click();
   await expect(page.getByRole('link',{name:'View published'})).toBeVisible({timeout:40_000});

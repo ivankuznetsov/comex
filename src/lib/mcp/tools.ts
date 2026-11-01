@@ -78,7 +78,7 @@ export function registerTools(server:McpServer,deps:ComexMcpDependencies,identit
     });
     return result('ok','Draft comics.',safe({comics,nextCursor:list.nextCursor ?? null}));
   });
-  registerRead('comex_get_comic','Get the current owner’s draft, estimated generation budget, story beats and dialogue, questions, suggestions, findings, versions, pending choices and next steps.',z.object({comicId:id}).strict(),async args=>{
+  registerRead('comex_get_comic','Get the current owner’s draft, story beats and dialogue, questions, suggestions, findings, versions, pending choices and next steps.',z.object({comicId:id}).strict(),async args=>{
     const {comic}=await deps.reads.getComic(identity,String(args.comicId));
     return result('ok','Current comic and next steps.',safe({comic,editorUrl:deps.editorOrigin ? `${deps.editorOrigin}/comics/${encodeURIComponent(String(args.comicId))}` : `/comics/${encodeURIComponent(String(args.comicId))}`}));
   });
