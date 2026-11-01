@@ -15,7 +15,9 @@ bun install --frozen-lockfile
 bun run dev --hostname 127.0.0.1
 ```
 
-Open the local address printed by Next.js. Drafts and images are stored in the ignored `data/` directory. New creators can start a draft with an email address; email-code sign-in saves those drafts to an account. Real code delivery requires the sender and secrets described in [local setup](docs/setup.md).
+Open the local address printed by Next.js. Drafts and images are stored in the ignored `data/` directory. A creator can start without an email; the browser session lasts 30 days. When email delivery is configured, creators can choose to claim those drafts by signing in from the same browser. Real code delivery requires the sender and secrets described in [local setup](docs/setup.md).
+
+Each running server serves the checkout and configuration it was started from. A development server on port 3000 is not automatically the same build or database as another instance. Check its working directory and branch before testing. Provider-call limits are persistent across server restarts; an exhausted shared budget remains exhausted. Use separate `COMEX_DB_PATH`, `COMEX_ASSET_PATH`, and `COMEX_BUDGET_DB_PATH` values for an isolated test, and set an intentional call limit as described in the setup guide.
 
 Real story and image generation needs an OpenAI API key and access to the configured models. Keep the key in 1Password and inject it into the local process; never commit it. See [local setup](docs/setup.md) and `.env.example`. A local three-page test has been generated; see the [live test findings](docs/research/live-test-2026-11-01.md). Actual monetary cost has not been measured.
 
@@ -29,7 +31,7 @@ bun run build
 
 ## Scope and status
 
-The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; selecting and adding a card starts its reference image. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background and their findings are advisory. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
+The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; drawing a reference is a separate action. Questions, suggestions, and images each use provider calls. One live story produced appropriate character suggestions, but the prompts and checks are not broadly calibrated. Reviews run in the background. Before drawing the next page or publishing, the creator must review and accept each flagged or inconclusive panel; an acceptance applies only to that image and story version. Later pages affected by a story revision are marked outdated and must currently be generated individually. Forking comics is future scope.
 
 The Vercel demo can route its API through a running local gateway, so its database, images and jobs remain on that machine. This is a temporary demo arrangement, not durable serverless hosting. See [setup](docs/setup.md); hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization are not yet implemented.
 

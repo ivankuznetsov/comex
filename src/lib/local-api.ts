@@ -9,13 +9,13 @@ import { z } from 'zod';
 import sharp from 'sharp';
 import { LocalStore, ClaimInProgressError, type PageJob } from './local-store';
 import { createBudgetedFetch, BudgetError } from './budget';
-import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseStory, publishComic, isPanelReady, type ComicDraft } from './domain/comic';
+import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseStory, publishComic, isPanelReady, isPanelReviewed, type ComicDraft } from './domain/comic';
 
 type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string; referenceAssetId?: string; approved: boolean};
 type PanelReview = {assetId:string; storyRevision:number; panelRevision:number; outcome:'pass' | 'findings' | 'inconclusive' | 'failed'};
 type SuggestedCharacter = {id:string; name:string; role:string; appearance:string; outfit:string};
-type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; initialQuestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; characterSuggestions?: SuggestedCharacter[]; initialSuggestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; panelsPerPage?: number; pageLayout?: 'stack' | 'grid'; storyboard?: Storyboard; storyReview?: unknown; storyReviewRunId?: string; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; pendingArtworkDecision?: {id:string;panelId:string;instruction:string;assetId:string;storyRevision:number;panelRevision:number;expiresAt:number}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>};
-type Edition = {id: string; title: string; creator: string; editionId: string; sourceRevision: number; pages: {id: string; imageUrl: string; storage?: 'sqlite'}[]};
+type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; initialQuestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; characterSuggestions?: SuggestedCharacter[]; initialSuggestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; panelsPerPage?: number; pageLayout?: 'stack' | 'grid'; storyboard?: Storyboard; storyReview?: unknown; storyReviewRunId?: string; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult; instruction?:string}; pendingArtworkDecision?: {id:string;panelId:string;instruction:string;assetId:string;storyRevision:number;panelRevision:number;expiresAt:number}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>};
+type Edition = {id: string; title: string; creator: string; editionId: string; sourceRevision: number; coverUrl?:string; pages: {id: string; imageUrl: string; storage?: 'sqlite'}[]};
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
 const ai = () => createAIService({fetch:createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))});
@@ -28,8 +28,13 @@ const panelVersionSchema = z.object({assetId:z.string().uuid(),storyRevision:z.n
 const publishSchema = z.object({title: short, creator: z.string().trim().max(100)}).strict();
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 function reply(data: unknown, status = 200) { return NextResponse.json(data, {status, headers: {'Cache-Control': 'no-store'}}); }
-function publicPageJob(job:PageJob|null) {
-  return job ? {id:job.id,pageId:job.pageId,state:job.state,message:job.message,createdAt:job.createdAt} : null;
+function publicPageJob(job:PageJob|null, draft?:Draft) {
+  if (!job) return null;
+  const baseline = draft?.pageOperations?.[job.pageId]?.baseline;
+  const panels = draft?.pages.find(page => page.id === job.pageId)?.panels ?? [];
+  const total = baseline ? Object.keys(baseline).length : panels.length;
+  const completed = baseline ? panels.filter(panel => baseline[panel.id] !== undefined && panel.revision > baseline[panel.id]).length : 0;
+  return {id:job.id,pageId:job.pageId,state:job.state,message:job.message,createdAt:job.createdAt,completed,total};
 }
 function owner(request: NextRequest): string | null {
   const authenticated = request.cookies.get('comex_auth')?.value;
@@ -88,16 +93,49 @@ function panelReview(draft: Draft, panel: ComicDraft['pages'][number]['panels'][
 function artworkReady(draft: Draft, panel: ComicDraft['pages'][number]['panels'][number]): boolean {
   return panel.storyRevision === draft.storyRevision && isPanelReady(panel) && !draft.operations?.[`panel:${panel.id}`];
 }
+function reviewedPanel(draft: Draft, panel: ComicDraft['pages'][number]['panels'][number]) {
+  const review = panelReview(draft, panel);
+  if (panel.status !== 'checking' || !review) return panel;
+  const evaluation: ComicDraft['pages'][number]['panels'][number]['evaluation'] = review.findings.some((f:any) => f?.severity === 'blocker') ? 'blocker' :
+    review.findings.some((f:any) => f?.severity === 'warning') ? 'warning' : review.outcome === 'pass' ? 'pass' : 'uncertain';
+  return {...panel, evaluation, status: evaluation === 'pass' ? 'current' as const : 'needs_review' as const};
+}
+function reviewReady(draft: Draft, panel: ComicDraft['pages'][number]['panels'][number]) {
+  return artworkReady(draft,panel) && isPanelReviewed(reviewedPanel(draft,panel));
+}
+function characterUsedInStory(draft:Draft, id:string) {
+  return draft.pages.length > 0 && (!draft.storyboard || draft.storyboard.bible.character_ids.includes(id) ||
+    draft.storyboard.pages.some(page => page.panels.some(panel => panel.character_ids.includes(id))));
+}
+function revisionPreview(draft:Draft, revision:number) {
+  const proposal=draft.pendingRevision, storyboard=draft.storyboard;
+  if (!proposal || proposal.baseRevision !== revision || !storyboard) return null;
+  const panels=proposal.result.revised_suffix.map(panel => {
+    const page=draft.pages.findIndex(p => p.panels.some(item => item.id === panel.id));
+    const index=page < 0 ? -1 : draft.pages[page].panels.findIndex(item => item.id === panel.id);
+    const previous=storyboard.pages.flatMap(p => p.panels).find(item => item.id === panel.id);
+    if (page < 0 || index < 0 || !previous) return null;
+    return {id:panel.id,page:page+1,panel:index+1,previousAction:previous.action,action:panel.action,
+      dialogue:panel.dialogue.map(line => ({speaker:draft.characters.find(character => character.id === line.speaker_id)?.name ?? line.speaker_id,text:line.text}))};
+  });
+  if (panels.some(panel => !panel)) return null;
+  const first=panels.find(panel => panel?.id === proposal.result.earliest_affected_panel_id);
+  if (!first) return null;
+  let explanation=proposal.result.explanation;
+  for (const [pageIndex,page] of draft.pages.entries()) for (const [panelIndex,panel] of page.panels.entries())
+    explanation=explanation.split(panel.id).join(`page ${pageIndex+1}, panel ${panelIndex+1}`);
+  return {id:proposal.id,earliestPanelId:first.id,affectedPage:first.page,affectedPanel:first.panel,explanation,panels,instruction:proposal.instruction ?? ''};
+}
 function view(draft: Draft, published: Edition | null, revision: number) {
   const reviewFingerprint = narrativeFingerprint(draft);
-  const storyReview = draft.storyReviewRunId ? getStore().getAdvisoryReview(draft.id,`story:${draft.storyReviewRunId}:${draft.storyRevision}`) ?? draft.storyReview : draft.storyReview;
+  const storyReview = currentStoryReview(draft);
   return {
     id: draft.id, revision, title: draft.title, plot: draft.plot, style: draft.styleId, panelsPerPage:draft.panelsPerPage ?? 3, pageLayout:draft.pageLayout ?? 'stack',
-    activePageJob:publicPageJob(getStore().activePageJob(draft.id,draft.ownerId)),
-    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: storyReview && typeof storyReview === 'object' ? {...storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
+    activePageJob:publicPageJob(getStore().activePageJob(draft.id,draft.ownerId),draft), pendingRevision:revisionPreview(draft,revision),
+    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,lockedByStory:characterUsedInStory(draft,character.id),referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: storyReview && typeof storyReview === 'object' ? {...storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
-      status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => artworkReady(draft,p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
-      panels: page.panels.map(p => {const review=panelReview(draft,p);return {id: p.id, description: p.beat, status: p.status === 'checking' && review ? 'needs_review' : p.status, evaluation: review?.findings.some((f:any)=>f?.severity==='blocker') ? 'blocker' : review?.findings.some((f:any)=>f?.severity==='warning') ? 'warning' : p.evaluation, reviewOutcome:review?.outcome ?? null, findings:review?.findings ?? [], ready:artworkReady(draft,p), accepted: !!p.acceptance && p.acceptance.assetId === p.assetId && p.acceptance.storyRevision === p.storyRevision && p.acceptance.panelRevision === p.revision, imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null};})})),
+      status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => reviewReady(draft,p)) ? 'current' : page.panels.some(p => reviewedPanel(draft,p).status === 'checking') ? 'checking' : page.panels.some(p => artworkReady(draft,p)) ? 'needs_review' : 'planned',
+      panels: page.panels.map(p => {const review=panelReview(draft,p), visible=reviewedPanel(draft,p);return {id: p.id, description: p.beat, status: visible.status, evaluation: visible.evaluation, reviewOutcome:review?.outcome ?? null, findings:review?.findings ?? [], ready:artworkReady(draft,p), reviewed:reviewReady(draft,p), accepted: !!p.acceptance && p.acceptance.assetId === p.assetId && p.acceptance.storyRevision === p.storyRevision && p.acceptance.panelRevision === p.revision, imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null};})})),
     published: !!published, publication: published ? {title:published.title, creator:published.creator} : null,
     unpublishedChanges: !!published && published.sourceRevision !== revision,
   };
@@ -201,12 +239,16 @@ async function asset(id: string): Promise<Buffer> {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new HttpError(404, 'Image not found.');
   try { return await readFile(resolve(assetRoot(), `${id}.png`)); } catch { throw new HttpError(404, 'Image not found.'); }
 }
+function currentStoryReview(draft:Draft): unknown {
+  return draft.storyReviewRunId ? getStore().getAdvisoryReview(draft.id,`story:${draft.storyReviewRunId}:${draft.storyRevision}`) ?? draft.storyReview : draft.storyReview;
+}
 function narrativeFingerprint(draft: Draft): string | null {
-  if (!draft.storyboard || !draft.storyReview || typeof draft.storyReview !== 'object') return null;
-  return createHash('sha256').update(JSON.stringify({revision:draft.storyRevision,storyboard:draft.storyboard,review:draft.storyReview})).digest('hex');
+  const review=currentStoryReview(draft);
+  if (!draft.storyboard || !review || typeof review !== 'object') return null;
+  return createHash('sha256').update(JSON.stringify({revision:draft.storyRevision,storyboard:draft.storyboard,review})).digest('hex');
 }
 function rawNarrativeBlocker(draft: Draft): boolean {
-  const review = draft.storyReview;
+  const review = currentStoryReview(draft);
   if (!review || typeof review !== 'object' || !('findings' in review) || !Array.isArray(review.findings)) return false;
   return review.findings.some((finding: unknown) => !!finding && typeof finding === 'object' && 'severity' in finding && finding.severity === 'blocker');
 }
@@ -306,7 +348,7 @@ async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]
       const lines: string[] = [];
       for (const dialogue of spec.dialogue) {
         const name = draft.characters.find(c => c.id === dialogue.speaker_id)?.name ?? dialogue.speaker_id;
-        lines.push(...displayDialogueLines(`${name}: ${dialogue.text}`, grid ? 17 : 25));
+        lines.push(...displayDialogueLines(`${name}: ${dialogue.text}`, grid ? 20 : 42));
       }
       sections.push({image,lines});
     }
@@ -318,7 +360,7 @@ async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]
     for (const row of rows) {
       let rowHeight = panelHeight;
       row.forEach((section,column) => {
-        const x = 20 + column * (panelWidth + 20);
+        const x = grid && row.length === 1 ? (1020 - panelWidth) / 2 : 20 + column * (panelWidth + 20);
         composites.push({input:section.image,top:y,left:x});
         if (section.lines.length) {
           const h = section.lines.length*30+24;
@@ -338,7 +380,7 @@ async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]
 async function generatePage(store:LocalStore,session:string,id:string,revision:number,data:Draft,pageId:string):Promise<NextResponse> {
       const pageIndex = data.pages.findIndex(p => p.id === pageId);
       if (pageIndex < 0) throw new HttpError(404, 'Page not found.');
-      if (pageIndex > 0 && data.pages[pageIndex-1].panels.some(p => !artworkReady(data,p))) throw new HttpError(409, 'Generate the preceding page first.');
+      if (pageIndex > 0 && data.pages[pageIndex-1].panels.some(p => !reviewReady(data,p))) throw new HttpError(409, 'Finish and review the preceding page first.');
       const requestedPage = data.pages[pageIndex];
       let operation = data.pageOperations?.[requestedPage.id];
       if (operation && operation.storyRevision !== data.storyRevision) operation = undefined;
@@ -386,7 +428,9 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         const identity = token && /^[a-f0-9]{64}$/.test(token) ? store.authIdentity(token) : null;
         const guestToken=request.cookies.get('comex_session')?.value;
         const guest=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? store.guestIdentity(guestToken) : null;
-        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null});
+        let signInAvailable = false;
+        try { const url = new URL(process.env.COMEX_APP_URL || ''); signInAvailable = url.origin === `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}` && !!process.env.RESEND_API_KEY && !!process.env.COMEX_EMAIL_FROM && (process.env.COMEX_AUTH_SECRET?.length ?? 0) >= 32; } catch { /* Email delivery has not been configured. */ }
+        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null, signInAvailable});
       }
       // Require Origin for these endpoints; never derive an email link from the Host header.
       const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
@@ -462,14 +506,14 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         if (!edition || request.nextUrl.searchParams.get('edition') !== edition.editionId) throw new HttpError(404, 'This edition is unavailable. Reload the comic.');
         const imageUrl = `/api/published/${encodeURIComponent(edition.id)}/assets/${encodeURIComponent(segments[3])}?edition=${encodeURIComponent(edition.editionId)}`;
         const page = edition.pages.find(p => p.imageUrl === imageUrl);
-        if (!page) throw new HttpError(404, 'Image not found.');
+        if (!page && edition.coverUrl !== imageUrl) throw new HttpError(404, 'Image not found.');
         // Older editions used files. New editions and their images commit together in SQLite.
-        const bytes = page.storage === 'sqlite' ? store.getPublicationAsset(edition.id, segments[3]) : await asset(segments[3]);
+        const bytes = !page || page.storage === 'sqlite' ? store.getPublicationAsset(edition.id, segments[3]) : await asset(segments[3]);
         if (!bytes) throw new HttpError(404, 'Image not found.');
         return new NextResponse(new Uint8Array(bytes), {headers: {'Content-Type':'image/png', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff'}});
       }
       if (segments.length === 1) {
-        const comics = store.listPublished<Edition>().map(e => ({id: e.id, title: e.title, creator: e.creator, pageCount: e.pages.length, coverUrl: e.pages[0]?.imageUrl ?? null}));
+        const comics = store.listPublished<Edition>().map(e => ({id: e.id, title: e.title, creator: e.creator, pageCount: e.pages.length, coverUrl: e.coverUrl ?? e.pages[0]?.imageUrl ?? null}));
         return reply({comics});
       }
       if (segments.length === 2) {
@@ -481,7 +525,10 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     if (segments[0] !== 'comics') throw new HttpError(404, 'Not found.');
     if (segments.length === 1 && method === 'GET') {
       const session = owner(request);
-      if (!session) throw new HttpError(401, 'Sign in to see your drafts.');
+      if (!session) {
+        if (request.cookies.has('comex_session') || request.cookies.has('comex_auth')) throw new HttpError(401, 'This browser session has expired.');
+        return reply({comics:[]});
+      }
       return reply({comics: store.listOwned<Draft>(session).map(d => ({id: d.id, title: d.title, plot: d.plot, published: !!store.getPublished<Edition>(d.id)}))});
     }
     if (segments.length === 1 && method === 'POST') {
@@ -489,8 +536,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       let session = owner(request);
       let guestToken: string | null = null;
       if (!session) {
-        if (!body.email) throw new HttpError(401, 'Enter your email to start creating.');
-        const at=body.email.lastIndexOf('@'); const email=`${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}`;
+        const at=body.email?.lastIndexOf('@') ?? -1; const email=body.email ? `${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}` : '';
         const guest=store.createGuest(email); session=guest.owner; guestToken=guest.token;
       }
       const id = randomUUID();
@@ -602,7 +648,8 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') {
       const body = await input(request,z.object({fingerprint:z.string().regex(/^[a-f0-9]{64}$/)}).strict());
       const fingerprint = narrativeFingerprint(data);
-      if (!fingerprint || body.fingerprint !== fingerprint || !rawNarrativeBlocker(data) || !data.storyReview || typeof data.storyReview !== 'object' || !('outcome' in data.storyReview) || data.storyReview.outcome !== 'findings') throw new HttpError(409,'This story review has changed or is not eligible for acceptance.');
+      const review=currentStoryReview(data);
+      if (!fingerprint || body.fingerprint !== fingerprint || !rawNarrativeBlocker(data) || !review || typeof review !== 'object' || !('outcome' in review) || review.outcome !== 'findings') throw new HttpError(409,'This story review has changed or is not eligible for acceptance.');
       return await withTextOperation(store,session,id,revision,async () => reply({comic:save(store,session,revision,{...data,storyReviewAcceptance:fingerprint})}));
     }
     if (segments[2] === 'story' && segments[3] === 'plan' && segments.length === 4 && method === 'POST') {
@@ -625,9 +672,9 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     }
     if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') {
       await input(request, z.object({}).strict());
-      if (data.pages.length) throw new HttpError(409, 'Character changes require a story revision.');
       const character = data.characters.find(c => c.id === segments[3]);
       if (!character) throw new HttpError(404, 'Character not found.');
+      if (characterUsedInStory(data,character.id)) throw new HttpError(409, 'This character is already in the story. Changing their reference requires revising the story.');
       const op = `character:${character.id}`;
       if (data.operations?.[op]) throw new HttpError(409, 'This image request is already running or has an unknown outcome.');
       const reserved: Draft = {...data, operations:{...data.operations,[op]:'running'}};
@@ -640,7 +687,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         for (let attempt = 0; attempt < 3; attempt++) {
           const latest = store.getOwned<Draft>(id,session);
           const current = latest?.data.characters.find(c => c.id === character.id);
-          if (!latest || latest.data.operations?.[op] !== 'running' || latest.data.pages.length || latest.data.styleId !== data.styleId || JSON.stringify(current) !== JSON.stringify(character))
+          if (!latest || latest.data.operations?.[op] !== 'running' || characterUsedInStory(latest.data,character.id) || latest.data.styleId !== data.styleId || JSON.stringify(current) !== JSON.stringify(character))
             throw new HttpError(409, 'Character inputs changed while rendering; the result was not applied.');
           const { [op]: ignored, ...operations } = latest.data.operations ?? {}; void ignored;
           const characters = latest.data.characters.map(c => c.id === character.id ? {...c, approved:false, referenceAssetId:assetId, referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`} : c);
@@ -664,15 +711,14 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     }
     if (segments[2] === 'characters' && segments.length === 3 && method === 'POST') {
       const body = await input(request, characterSchema);
-      if (data.pages.length) throw new HttpError(409, 'Revise the story before changing characters on planned pages.');
       const character: Character = {...body, id: randomUUID(), approved: false};
       return reply({comic: save(store, session, revision, {...data, characters: [...data.characters, character]})});
     }
     if (segments[2] === 'characters' && segments.length === 4 && (method === 'PATCH' || method === 'DELETE')) {
       const body = method === 'PATCH' ? await input(request, characterSchema) : await input(request, z.object({}).strict());
-      if (data.pages.length) throw new HttpError(409, 'Character changes require a story revision.');
       const character = data.characters.find(c => c.id === segments[3]);
       if (!character) throw new HttpError(404, 'Character not found.');
+      if (characterUsedInStory(data,character.id)) throw new HttpError(409, 'This character is already in the story. Changing their card requires revising the story.');
       if (data.operations?.[`character:${character.id}`]) throw new HttpError(409, 'Wait until the character reference request is resolved before changing this card.');
       if (method === 'DELETE') return reply({comic: save(store, session, revision, {...data, characters: data.characters.filter(c => c.id !== character.id)})});
       const values = body as z.infer<typeof characterSchema>;
@@ -706,18 +752,11 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (errors.length) throw new HttpError(422, `Revised story state needs correction: ${errors[0]}`);
       const pageIndex = data.pages.findIndex(page => page.panels.some(panel => panel.id === result.earliest_affected_panel_id));
       if (pageIndex < 0) throw new HttpError(422,'Revision points to a missing panel.');
-      const affectedPanel = data.pages[pageIndex].panels.findIndex(panel => panel.id === result.earliest_affected_panel_id) + 1;
-      const proposal = {id:randomUUID(),baseRevision:revision+1,result};
-      const panels = result.revised_suffix.map(panel => {
-        const page = data.pages.findIndex(p => p.panels.some(item => item.id === panel.id));
-        const index = page < 0 ? -1 : data.pages[page].panels.findIndex(item => item.id === panel.id);
-        const previous = currentStoryboard.pages.flatMap(p => p.panels).find(item => item.id === panel.id);
-        if (page < 0 || index < 0 || !previous) throw new HttpError(422,'Revision contains an unknown panel.');
-        return {id:panel.id,page:page+1,panel:index+1,previousAction:previous.action,action:panel.action,
-          dialogue:panel.dialogue.map(line => ({speaker:data.characters.find(character => character.id === line.speaker_id)?.name ?? line.speaker_id,text:line.text}))};
-      });
+      const proposal = {id:randomUUID(),baseRevision:revision+1,result,instruction:body.instruction};
+      const preview=revisionPreview({...data,pendingRevision:proposal},revision+1);
+      if (!preview) throw new HttpError(422,'Revision contains an unknown panel.');
       if (!store.update(id,session,revision,{...data,pendingRevision:proposal})) throw new HttpError(409,'Draft changed while planning the revision; refresh and try again.');
-      return reply({proposal:{id:proposal.id,earliestPanelId:result.earliest_affected_panel_id,affectedPage:pageIndex+1,affectedPanel,explanation:result.explanation,panels}});
+      return reply({proposal:preview});
       });
     }
     if (segments[2] === 'revisions' && segments.length === 3 && method === 'POST') {
@@ -730,8 +769,20 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       const errors = validateStoryLedger(storyboard);
       if (errors.length) throw new HttpError(422, `Revised story state needs correction: ${errors[0]}`);
       const beats = Object.fromEntries(proposal.result.revised_suffix.map(panel => [panel.id,panel.action]));
-      const updated = reviseStory(data,session,data.storyRevision,proposal.result.earliest_affected_panel_id,beats) as Draft;
-      const next: Draft = {...updated,storyboard,storyReview:{outcome:'pending',findings:[]},storyReviewRunId:randomUUID(),storyReviewAcceptance:undefined,pendingRevision:undefined,pageOperations:undefined};
+      // Preserve completed reviews for unchanged prefix images before their story version advances.
+      const resolved = {...data,pages:data.pages.map(page => ({...page,panels:page.panels.map(panel => reviewedPanel(data,panel))}))};
+      const updated = reviseStory(resolved,session,data.storyRevision,proposal.result.earliest_affected_panel_id,beats) as Draft;
+      const oldPanels=data.pages.flatMap(page => page.panels), newPanels=updated.pages.flatMap(page => page.panels);
+      const first=oldPanels.findIndex(panel => panel.id === proposal.result.earliest_affected_panel_id);
+      const panelReviews={...data.panelReviews}, panelFindings={...data.panelFindings};
+      for (let index=0;index<first;index++) {
+        const review=panelReview(data,oldPanels[index]), panel=newPanels[index];
+        if (review && panel.assetId) {
+          panelReviews[panel.id]={assetId:panel.assetId,storyRevision:panel.storyRevision,panelRevision:panel.revision,outcome:review.outcome};
+          panelFindings[panel.id]=review.findings;
+        }
+      }
+      const next: Draft = {...updated,storyboard,panelReviews,panelFindings,storyReview:{outcome:'pending',findings:[]},storyReviewRunId:randomUUID(),storyReviewAcceptance:undefined,pendingRevision:undefined,pageOperations:undefined};
       if (!store.update(id,session,revision,next)) throw new HttpError(409,'Draft changed while applying revision; preview it again.');
       return next;
       });
@@ -755,7 +806,8 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         }
       }
       const latest = store.getOwned<Draft>(id,session)!;
-      return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision),notice:pausedNotice || 'Later pages remain outdated until you generate them.'});
+      const laterOutdated=latest.data.pages.slice(firstPage+1).some(page => page.panels.some(panel => panel.status === 'outdated'));
+      return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision),notice:pausedNotice || (laterOutdated ? 'Story updated. Later pages need to be drawn again.' : 'Story updated. Review the updated artwork and checks.')});
     }
     if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'download' && method === 'GET') {
       const page = data.pages.find(p => p.id === segments[3]);
@@ -768,7 +820,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'job' && method === 'GET') {
       const requestId=request.nextUrl.searchParams.get('id') ?? undefined;
       if (requestId && !z.string().uuid().safeParse(requestId).success) throw new HttpError(400,'Invalid page job.');
-      return reply({job:publicPageJob(store.pageJob(id,session,segments[3],requestId)),comic:view(data,store.getPublished<Edition>(id),revision)});
+      return reply({job:publicPageJob(store.pageJob(id,session,segments[3],requestId),data),comic:view(data,store.getPublished<Edition>(id),revision)});
     }
     if (segments[2] === 'pages' && segments.length === 5 && ['generate','generate-async'].includes(segments[4]) && method === 'POST') {
       const asynchronous=segments[4] === 'generate-async';
@@ -779,7 +831,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (previous) return reply({job:publicPageJob(previous),comic:view(data,store.getPublished<Edition>(id),revision)},previous.state === 'running' ? 202 : 200);
       const index=data.pages.findIndex(p=>p.id===segments[3]);
       if (index<0) throw new HttpError(404,'Page not found.');
-      if (index>0 && data.pages[index-1].panels.some(p=>!artworkReady(data,p))) throw new HttpError(409,'Generate the preceding page first.');
+      if (index>0 && data.pages[index-1].panels.some(p=>!reviewReady(data,p))) throw new HttpError(409,'Finish and review the preceding page first.');
       const reservation=store.beginPageJob(id,session,segments[3],requestId,expected);
       if (!reservation) throw new HttpError(409,'The page is already drawing, needs recovery, or the draft changed. Refresh and try again.');
       if (!reservation.created) return reply({job:publicPageJob(reservation.job),comic:view(data,store.getPublished<Edition>(id),revision)},reservation.job.state === 'running' ? 202 : 200);
@@ -846,7 +898,9 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (!panel || !panel.assetId) throw new HttpError(404,'Panel image not found.');
       if (panel.assetId !== reviewed.assetId || panel.revision !== reviewed.panelRevision || panel.storyRevision !== reviewed.storyRevision || data.storyRevision !== reviewed.storyRevision) throw new HttpError(409,'This panel changed since you reviewed it. Refresh and review the current image.');
       let updated: Draft;
-      try { updated = acceptPanel(data,session,panel.id,reviewed.assetId,reviewed.storyRevision) as Draft; }
+      const resolved = reviewedPanel(data,panel);
+      const resolvedDraft = {...data,pages:data.pages.map(page => ({...page,panels:page.panels.map(p => p.id === panel.id ? resolved : p)}))};
+      try { updated = acceptPanel(resolvedDraft,session,panel.id,reviewed.assetId,reviewed.storyRevision) as Draft; }
       catch { throw new HttpError(409,'This panel cannot be accepted in its current state.'); }
       return reply({comic:save(store,session,revision,updated)});
     }
@@ -854,15 +908,19 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       const body = await input(request, publishSchema);
       const updated = {...data, title: body.title, creatorName: body.creator};
       if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !artworkReady(updated,p)))) throw new HttpError(409, 'All current panels must be generated before publishing.');
+      if (updated.pages.some(page => page.panels.some(p => !reviewReady(updated,p)))) throw new HttpError(409, 'Finish checking and accept the findings on every panel before publishing.');
       const pageImages = await composePages(updated);
       const pages = pageImages.map(page => ({id:page.id,assetId:randomUUID(),image:page.image}));
-      const composed = {...updated,pages:updated.pages.map((page,i) => ({...page,composition:{assetId:pages[i].assetId,panelAssetIds:page.panels.map(panel => panel.assetId!)}}))};
+      const composed = {...updated,pages:updated.pages.map((page,i) => ({...page,panels:page.panels.map(panel => reviewedPanel(updated,panel)),composition:{assetId:pages[i].assetId,panelAssetIds:page.panels.map(panel => panel.assetId!)}}))};
       const editionId = randomUUID();
       const validated = publishComic(composed, session, updated.storyRevision, editionId);
       if (!validated.published) throw new HttpError(409, 'This comic is not ready to publish.');
+      const coverAssetId = randomUUID();
+      const cover = await asset(updated.pages[0].panels[0].assetId!);
       const edition: Edition = {id,title:body.title,creator:body.creator || 'Anonymous',editionId,sourceRevision:revision + 1,
+        coverUrl:`/api/published/${encodeURIComponent(id)}/assets/${encodeURIComponent(coverAssetId)}?edition=${encodeURIComponent(editionId)}`,
         pages:pages.map(p => ({id:p.id,imageUrl:`/api/published/${encodeURIComponent(id)}/assets/${encodeURIComponent(p.assetId)}?edition=${encodeURIComponent(editionId)}`,storage:'sqlite'}))};
-      if (!store.publish(id,session,revision,edition,pages.map(p => ({id:p.assetId,data:p.image})))) throw new HttpError(409,'Draft changed while publishing; refresh and try again.');
+      if (!store.publish(id,session,revision,edition,[...pages.map(p => ({id:p.assetId,data:p.image})),{id:coverAssetId,data:cover}])) throw new HttpError(409,'Draft changed while publishing; refresh and try again.');
       return reply({comic:view(data,edition,revision + 1)});
     }
     if (segments[2] === 'unpublish' && segments.length === 3 && method === 'POST') {

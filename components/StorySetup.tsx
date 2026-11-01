@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ComicShell, Eyebrow, Message, button, field } from './ComicShell';
@@ -8,10 +8,6 @@ import { styles, type ComicStyle } from './types';
 
 export default function StorySetup() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [signedIn, setSignedIn] = useState(false);
-  const [sessionReady, setSessionReady] = useState(false);
-  useEffect(() => {request<{user:{email:string}|null}>('/api/auth/session').then(data => setSignedIn(!!data.user)).catch(() => {}).finally(() => setSessionReady(true));}, []);
   const [title, setTitle] = useState('');
   const [plot, setPlot] = useState('');
   const [style, setStyle] = useState<ComicStyle>('clear-line-adventure');
@@ -20,7 +16,7 @@ export default function StorySetup() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError('');
     try {
-      const {comic} = await request<{comic:{id:string}}>('/api/comics', {method:'POST',body:JSON.stringify({title:title.trim(),plot:plot.trim(),style,...(!signedIn ? {email:email.trim()} : {})})});
+      const {comic} = await request<{comic:{id:string}}>('/api/comics', {method:'POST',body:JSON.stringify({title:title.trim(),plot:plot.trim(),style})});
       router.push(`/comics/${encodeURIComponent(comic.id)}`);
     } catch (e) { setError(errorMessage(e)); setBusy(false); }
   }
@@ -30,12 +26,11 @@ export default function StorySetup() {
     <form onSubmit={submit} className="mt-10 border-[3px] border-[#171717] bg-[#fffef8] shadow-[6px_6px_0_#171717]">
       <div className="border-b-[3px] border-[#171717] bg-[#ffd83d] px-5 py-3 font-black uppercase tracking-wide sm:px-8">01 / The idea</div>
       <div className="space-y-8 p-5 sm:p-8">
-        {sessionReady && !signedIn && <div><label htmlFor="email" className="mb-2 block text-lg font-black">Your email address</label><input id="email" name="email" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} maxLength={254} required className={field} /><p className="mt-2 text-sm">Start now in this browser. Verify your email to save your drafts to your account and access them elsewhere.</p></div>}
         <div><label htmlFor="title" className="mb-2 block text-lg font-black">Give your comic a title</label><input id="title" name="title" value={title} onChange={e => setTitle(e.target.value)} maxLength={100} required placeholder="The last delivery" className={field} /></div>
         <div><label htmlFor="plot" className="mb-2 block text-lg font-black">What happens in your story?</label><p className="mb-3 text-sm">A few sentences is plenty. Who is it about, and what do they want?</p><textarea id="plot" name="plot" value={plot} onChange={e => setPlot(e.target.value)} maxLength={3000} minLength={8} required rows={5} placeholder="A courier discovers a clockwork bird carrying a very important key…" className={field} /></div>
         <fieldset><legend className="mb-3 text-lg font-black">Choose the look</legend><p className="mb-4 text-sm">Example artwork for each style; your comic will have its own characters and scenes.</p><div className="grid gap-4 md:grid-cols-3">{styles.map(item => <label key={item.id} className={`flex cursor-pointer flex-col border-[3px] p-4 transition-transform focus-within:outline-3 focus-within:outline-offset-4 focus-within:outline-[#1849a9] ${style === item.id ? 'border-[#171717] bg-[#ffd83d] shadow-[4px_4px_0_#171717]' : 'border-[#171717] bg-[#fffef8] hover:-translate-y-px'}`}><input type="radio" name="style" value={item.id} checked={style === item.id} onChange={() => setStyle(item.id)} className="sr-only" /><img src={item.image} alt="" aria-hidden="true" width={640} height={480} className="mb-4 aspect-[4/3] w-full border-2 border-[#171717] object-cover" /><span className="font-black">{item.name}</span><span className="mt-1 text-sm leading-relaxed">{item.description}</span><span className="mt-3 text-xs font-black uppercase">{style === item.id ? '● Selected' : '○ Select style'}</span></label>)}</div></fieldset>
-        {error && <Message error>{error} <Link className="font-bold underline" href="/sign-in">Sign in</Link></Message>}
-        <div className="flex flex-wrap items-center justify-between gap-5 border-t-2 border-[#171717] pt-6"><p className="max-w-sm text-sm">Your draft is saved in this browser. Verify your email to keep it in your account.</p><button disabled={busy || !sessionReady} type="submit" className={button}>{busy ? 'Creating your draft…' : 'Start creating →'}</button></div>
+        {error && <Message error>{error}</Message>}
+        <div className="flex flex-wrap items-center justify-between gap-5 border-t-2 border-[#171717] pt-6"><p className="max-w-sm text-sm">Your draft is saved in this browser for 30 days. Starting also uses AI calls to suggest questions and characters.</p><button disabled={busy} type="submit" className={button}>{busy ? 'Creating your draft…' : 'Start creating →'}</button></div>
       </div>
     </form>
   </main></ComicShell>;

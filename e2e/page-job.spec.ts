@@ -5,7 +5,7 @@ import {signIn} from './sign-in-helper';
 
 test('page job survives browser reload and is shared across tabs',async ({browser})=>{
   test.skip(process.env.COMEX_E2E_FAKE_PROVIDER !== '1','Requires isolated fake provider');
-  test.setTimeout(90_000);
+  test.setTimeout(150_000);
   const mailbox=process.env.COMEX_E2E_MAILBOX!;
   const hold=join(mailbox,'hold-image'), count=join(mailbox,'image-count');
   const context=await browser.newContext(); const page=await context.newPage();
@@ -22,6 +22,7 @@ test('page job survives browser reload and is shared across tabs',async ({browse
     await page.getByLabel('appearance',{exact:true}).fill('Short red hair');
     await page.getByLabel('outfit',{exact:true}).fill('Yellow raincoat');
     await page.getByRole('button',{name:'Add character'}).click();
+    await page.getByRole('button',{name:'Draw reference (AI call)'}).click();
     await expect(page.getByAltText('Reference for Mina')).toBeVisible();
     await page.getByRole('button',{name:'Approve',exact:true}).click();
     await page.getByRole('button',{name:/Plan story/}).click();
@@ -29,12 +30,12 @@ test('page job survives browser reload and is shared across tabs',async ({browse
     const before=(await readFile(count,'utf8')).trim().split('\n').length;
     await writeFile(hold,'1');
     await page.getByRole('button',{name:'Generate page',exact:true}).click();
-    await expect(page.getByText('Drawing this page; you can return to check progress.',{exact:false})).toBeVisible();
+    await expect(page.getByText('Drawing page 1 — panel 1 of 3.',{exact:false})).toBeVisible();
     await page.reload();
-    await expect(page.getByText('Drawing this page; you can return to check progress.',{exact:false})).toBeVisible();
+    await expect(page.getByText('Drawing page 1 — panel 1 of 3.',{exact:false})).toBeVisible();
     await expect(page.getByRole('button',{name:'Page 2',exact:true})).toBeDisabled();
     const second=await context.newPage(); await second.goto(page.url());
-    await expect(second.getByText('Drawing this page; you can return to check progress.',{exact:false})).toBeVisible();
+    await expect(second.getByText('Drawing page 1 — panel 1 of 3.',{exact:false})).toBeVisible({timeout:30_000});
     await expect(second.getByRole('button',{name:'Generate page',exact:true})).toBeDisabled();
     await rm(hold);
     await expect(page.getByRole('img',{name:'Page 1, panel 3'})).toBeVisible({timeout:40_000});
