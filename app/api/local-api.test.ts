@@ -1049,3 +1049,147 @@ test('a successful empty visual review is distinguishable from failure and remai
     const fresh=await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id]);expect((await fresh.json()).comic.pages[0].panels[0].reviewOutcome).toBeNull();
   } finally {globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
+
+test('uploaded references are private, normalized, and approved by exact image', async () => {
+  const {mkdtemp, rm} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os'); const {join} = await import('node:path');
+  const sharp = (await import('sharp')).default;
+  const dir = await mkdtemp(join(tmpdir(), 'comex-upload-'));
+  const priorAssetPath = process.env.COMEX_ASSET_PATH; process.env.COMEX_ASSET_PATH = dir;
+  const priorFetch = globalThis.fetch; let calls = 0;
+  try {
+    globalThis.fetch = (async () => {calls++; throw new Error('upload must not call a provider');}) as unknown as typeof fetch;
+    const created = await post('comics', {title:'References',plot:'A lighthouse',style:'ink-manga'});
+    const {comic} = await created.json(); const cookie = created.headers.get('set-cookie')!.split(';')[0];
+    const added = await post(`comics/${comic.id}/characters`, {name:'Pip',role:'keeper',appearance:'old card',outfit:'coat'}, cookie);
+    const character = (await added.json()).comic.characters[0];
+    const png = await sharp({create:{width:4,height:4,channels:4,background:{r:20,g:40,b:80,alpha:0.5}}}).png().toBuffer();
+    const upload = async (bytes: Uint8Array, expected: string, expectedCard: string, media = 'image/png', owner = cookie, origin?: string) => {
+      const form = new FormData(); form.set('image',new File([Uint8Array.from(bytes)],'pip.png',{type:media}));
+      form.set('appearance','Blue hair'); form.set('outfit','Red coat'); form.set('expectedReferenceId',expected); form.set('expectedCardVersion',expectedCard);
+      const path = `comics/${comic.id}/characters/${character.id}/reference/upload`;
+      return handleApi(new NextRequest(`http://localhost:3000/api/${path}`,{method:'POST',headers:{cookie:owner,...(origin ? {origin} : {})},body:form}),path.split('/'));
+    };
+    const first = await upload(png, '',character.cardVersion); expect(first.status).toBe(200);
+    const firstCard = (await first.json()).comic.characters[0];
+    expect(firstCard.approved).toBe(false); expect(firstCard.appearance).toBe('Blue hair'); expect(firstCard.referenceVersion).toBeTruthy();
+    const denied = await handleApi(request(`comics/${comic.id}/assets/${firstCard.referenceVersion}`),['comics',comic.id,'assets',firstCard.referenceVersion]);
+    expect(denied.status).toBe(404);
+    const preview = await handleApi(request(`comics/${comic.id}/assets/${firstCard.referenceVersion}`,'GET',undefined,cookie),['comics',comic.id,'assets',firstCard.referenceVersion]);
+    expect(preview.status).toBe(200); expect((await sharp(Buffer.from(await preview.arrayBuffer())).metadata()).format).toBe('png');
+    const approvedFirst=await post(`comics/${comic.id}/characters/${character.id}/approve`,{assetId:firstCard.referenceVersion},cookie);
+    const approvedCard=(await approvedFirst.json()).comic.characters[0]; expect(approvedCard.approved).toBe(true);
+    const second = await upload(png,firstCard.referenceVersion,approvedCard.cardVersion); expect(second.status).toBe(200);
+    const secondCard = (await second.json()).comic.characters[0]; expect(secondCard.referenceVersion).not.toBe(firstCard.referenceVersion); expect(secondCard.approved).toBe(false);
+    const stale = await post(`comics/${comic.id}/characters/${character.id}/approve`,{assetId:firstCard.referenceVersion},cookie);
+    expect(stale.status).toBe(409);
+    const approved = await post(`comics/${comic.id}/characters/${character.id}/approve`,{assetId:secondCard.referenceVersion},cookie);
+    expect(approved.status).toBe(200); const currentCard=(await approved.json()).comic.characters[0]; expect(currentCard.approved).toBe(true);
+    expect((await upload(new Uint8Array([1,2,3]),secondCard.referenceVersion,currentCard.cardVersion)).status).toBe(400);
+    expect((await upload(png,secondCard.referenceVersion,currentCard.cardVersion,'image/png',cookie,'https://evil.example')).status).toBe(403);
+    expect(calls).toBe(0);
+  } finally {globalThis.fetch = priorFetch; if (priorAssetPath === undefined) delete process.env.COMEX_ASSET_PATH; else process.env.COMEX_ASSET_PATH = priorAssetPath; await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('separately uploaded character sheets remain labeled anchors in panel rendering', async () => {
+  const {mkdtemp,rm}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
+  const sharp=(await import('sharp')).default; const {createComic}=await import('@/src/lib/domain/comic');
+  const dir=await mkdtemp(join(tmpdir(),'comex-anchors-')); const originalFetch=globalThis.fetch;
+  const previous={asset:process.env.COMEX_ASSET_PATH,budget:process.env.COMEX_BUDGET_DB_PATH,limit:process.env.COMEX_MAX_PROVIDER_CALLS,concurrent:process.env.COMEX_MAX_CONCURRENT_CALLS,key:process.env.OPENAI_API_KEY};
+  process.env.COMEX_ASSET_PATH=dir; process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite'); process.env.COMEX_MAX_PROVIDER_CALLS='5'; process.env.COMEX_MAX_CONCURRENT_CALLS='2'; process.env.OPENAI_API_KEY='test';
+  try {
+    const created=await post('comics',{title:'Two anchors',plot:'Pip and Nora explore',style:'ink-manga'});
+    const {comic}=await created.json(); const cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+    const images:Buffer[]=[]; const characters:string[]=[];
+    for (const [name,color] of [['Pip','#a12020'],['Nora','#2040a1']]) {
+      const added=await post(`comics/${comic.id}/characters`,{name,role:'Keeper',appearance:`${name} face`,outfit:'Coat'},cookie);
+      const character=(await added.json()).comic.characters.at(-1); characters.push(character.id);
+      const png=await sharp({create:{width:8,height:8,channels:3,background:color}}).png().toBuffer();
+      const form=new FormData(); form.set('image',new File([Uint8Array.from(png)],`${name}.png`,{type:'image/png'}));
+      form.set('appearance',`${name} face`); form.set('outfit','Coat'); form.set('expectedReferenceId',''); form.set('expectedCardVersion',character.cardVersion);
+      const path=`comics/${comic.id}/characters/${character.id}/reference/upload`;
+      const uploaded=await handleApi(new NextRequest(`http://localhost:3000/api/${path}`,{method:'POST',headers:{cookie},body:form}),path.split('/'));
+      expect(uploaded.status).toBe(200); const card=(await uploaded.json()).comic.characters.find((c:{id:string})=>c.id===character.id);
+      const saved=await handleApi(request(`comics/${comic.id}/assets/${card.referenceVersion}`,'GET',undefined,cookie),['comics',comic.id,'assets',card.referenceVersion]);
+      images.push(Buffer.from(await saved.arrayBuffer()));
+      expect((await post(`comics/${comic.id}/characters/${character.id}/approve`,{assetId:card.referenceVersion},cookie)).status).toBe(200);
+    }
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore, current=store.getOwned<any>(comic.id,owner)!;
+    const domain=createComic({id:comic.id,ownerId:owner,title:'Two anchors',creatorName:'',plot:'Pip and Nora explore',styleId:'ink-manga',pages:[{id:'page1',panels:[{id:'p1',beat:'Together'}]}]});
+    const state={location:'lighthouse',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
+    const storyboard={bible:{premise:'Explore',setting:'lighthouse',rules:[],character_ids:characters},pages:[{index:1,panels:[{id:'p1',index:1,character_ids:characters,action:'Together',framing:'wide',dialogue:[],state_before:state,state_after:state}]}]};
+    expect(store.update(comic.id,owner,current.revision,{...current.data,...domain,storyboard})).toBe(true);
+    let imageCalls=0;
+    globalThis.fetch=(async (url:string|URL|Request,init?:RequestInit)=>{
+      if(String(url).includes('/images/')) {
+        imageCalls++; const form=init!.body as FormData, prompt=String(form.get('prompt')), files=form.getAll('image[]') as File[];
+        expect(prompt).toContain(`approved character, ID ${characters[0]}`); expect(prompt).toContain(`approved character, ID ${characters[1]}`);
+        expect(files).toHaveLength(2); expect(Buffer.from(await files[0].arrayBuffer()).toString('hex')).toBe(images[0].toString('hex')); expect(Buffer.from(await files[1].arrayBuffer()).toString('hex')).toBe(images[1].toString('hex'));
+        return Response.json({data:[{b64_json:images[0].toString('base64')}]});
+      }
+      return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({outcome:'pass',findings:[]})}]}]});
+    }) as typeof fetch;
+    expect((await post(`comics/${comic.id}/pages/page1/generate`,{},cookie)).status).toBe(200);
+    await waitForComic(comic.id,cookie,c=>c.pages[0].panels[0].reviewOutcome!==null);
+    expect(imageCalls).toBe(1);
+  } finally {
+    globalThis.fetch=originalFetch;
+    for (const [name,value] of Object.entries({COMEX_ASSET_PATH:previous.asset,COMEX_BUDGET_DB_PATH:previous.budget,COMEX_MAX_PROVIDER_CALLS:previous.limit,COMEX_MAX_CONCURRENT_CALLS:previous.concurrent,OPENAI_API_KEY:previous.key})) { if(value===undefined) delete process.env[name]; else process.env[name]=value; }
+    await rm(dir,{recursive:true,force:true});
+  }
+});
+
+test('reference uploads reject stale cards, other owners, duplicate fields and planned or pending work', async () => {
+  const {mkdtemp,rm,readdir}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
+  const sharp=(await import('sharp')).default; const dir=await mkdtemp(join(tmpdir(),'comex-upload-guards-')); const prior=process.env.COMEX_ASSET_PATH; process.env.COMEX_ASSET_PATH=dir;
+  try {
+    const created=await post('comics',{title:'Upload guards',plot:'A lighthouse',style:'ink-manga'}); const {comic}=await created.json();
+    const cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+    const added=await post(`comics/${comic.id}/characters`,{name:'Pip',role:'Keeper',appearance:'Hair',outfit:'Coat'},cookie);
+    const character=(await added.json()).comic.characters[0]; const path=`comics/${comic.id}/characters/${character.id}/reference/upload`;
+    const png=await sharp({create:{width:4,height:4,channels:3,background:'#abc'}}).png().toBuffer();
+    const upload=(givenCookie:string, expected='', duplicate=false) => {
+      const form=new FormData(); form.set('image',new File([Uint8Array.from(png)],'pip.png',{type:'image/png'})); form.set('appearance','Hair'); form.set('outfit','Coat'); form.set('expectedReferenceId',expected); form.set('expectedCardVersion',character.cardVersion);
+      if(duplicate) form.append('appearance','Another card');
+      return handleApi(new NextRequest(`http://localhost:3000/api/${path}`,{method:'POST',headers:{cookie:givenCookie},body:form}),path.split('/'));
+    };
+    expect((await upload(fixtureSession())).status).toBe(404);
+    expect((await upload(cookie,'',true)).status).toBe(400);
+    expect((await upload(cookie,'obsolete')).status).toBe(409);
+    const editPath=`comics/${comic.id}/characters/${character.id}`;
+    expect((await handleApi(request(editPath,'PATCH',{name:'Pip',role:'Keeper',appearance:'New hair',outfit:'Coat'},cookie),editPath.split('/'))).status).toBe(200);
+    expect((await upload(cookie)).status).toBe(409);
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore;
+    let current=store.getOwned<any>(comic.id,owner)!;
+    expect(store.update(comic.id,owner,current.revision,{...current.data,operations:{[`character:${character.id}`]:'unknown_outcome'}})).toBe(true);
+    expect((await upload(cookie)).status).toBe(409);
+    current=store.getOwned<any>(comic.id,owner)!;
+    expect(store.update(comic.id,owner,current.revision,{...current.data,operations:{},pages:[{id:'planned',panels:[]}]})).toBe(true);
+    expect((await upload(cookie)).status).toBe(409);
+    expect((await readdir(dir)).length).toBe(0);
+  } finally {if(prior===undefined) delete process.env.COMEX_ASSET_PATH; else process.env.COMEX_ASSET_PATH=prior; await rm(dir,{recursive:true,force:true});}
+});
+
+test('an upload cannot attach after the draft changes during multipart transfer', async () => {
+  const {mkdtemp,rm,readdir}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
+  const sharp=(await import('sharp')).default; const dir=await mkdtemp(join(tmpdir(),'comex-upload-race-')); const prior=process.env.COMEX_ASSET_PATH; process.env.COMEX_ASSET_PATH=dir;
+  try {
+    const created=await post('comics',{title:'Upload race',plot:'A lighthouse',style:'ink-manga'}); const {comic}=await created.json();
+    const cookie=created.headers.get('set-cookie')!.split(';')[0],owner=cookie.split('=')[1];
+    const added=await post(`comics/${comic.id}/characters`,{name:'Pip',role:'Keeper',appearance:'Hair',outfit:'Coat'},cookie);
+    const character=(await added.json()).comic.characters[0]; const path=`comics/${comic.id}/characters/${character.id}/reference/upload`;
+    const png=await sharp({create:{width:4,height:4,channels:3,background:'#abc'}}).png().toBuffer();
+    const form=new FormData(); form.set('image',new File([Uint8Array.from(png)],'pip.png',{type:'image/png'})); form.set('appearance','Hair'); form.set('outfit','Coat'); form.set('expectedReferenceId',''); form.set('expectedCardVersion',character.cardVersion);
+    const encoded=new Request('http://localhost/upload',{method:'POST',body:form}); const contentType=encoded.headers.get('content-type')!; const body=new Uint8Array(await encoded.arrayBuffer());
+    let started!:()=>void,release!:()=>void; const began=new Promise<void>(r=>started=r),gate=new Promise<void>(r=>release=r); let chunk=0;
+    const stream=new ReadableStream<Uint8Array>({async pull(controller) {if(chunk++===0) {controller.enqueue(body.subarray(0,10)); started();} else {await gate; controller.enqueue(body.subarray(10)); controller.close();}}});
+    const pending=handleApi(new NextRequest(`http://localhost:3000/api/${path}`,{method:'POST',headers:{cookie,'content-type':contentType},body:stream,duplex:'half'}),path.split('/'));
+    await began;
+    const store=(globalThis as typeof globalThis & {__comexLocalStore:LocalStore}).__comexLocalStore, current=store.getOwned<any>(comic.id,owner)!;
+    expect(store.update(comic.id,owner,current.revision,{...current.data,title:'Changed while uploading'})).toBe(true);
+    release(); expect((await pending).status).toBe(409);
+    expect(store.getOwned<any>(comic.id,owner)!.data.characters[0].referenceAssetId).toBeUndefined();
+    expect((await readdir(dir)).length).toBe(0);
+  } finally {if(prior===undefined) delete process.env.COMEX_ASSET_PATH; else process.env.COMEX_ASSET_PATH=prior; await rm(dir,{recursive:true,force:true});}
+});

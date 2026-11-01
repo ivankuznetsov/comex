@@ -9,6 +9,7 @@ import { z } from 'zod';
 import sharp from 'sharp';
 import { LocalStore, ClaimInProgressError, type PageJob } from './local-store';
 import { createBudgetedFetch, BudgetError } from './budget';
+import { readReferenceForm, normalizeReference, UploadError } from './reference-upload';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseStory, publishComic, isPanelReady, type ComicDraft } from './domain/comic';
 
 type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string; referenceAssetId?: string; approved: boolean};
@@ -46,7 +47,7 @@ function owner(request: NextRequest): string | null {
   // Do not revive expired guests or treat current internal owner IDs as cookies.
   return !store.hasGuestToken(guest) && store.hasLegacyOwner(guest) ? guest : null;
 }
-function assertMutation(request: NextRequest) {
+function assertOrigin(request: NextRequest) {
   const origin = request.headers.get('origin');
   if (origin) {
     let supplied: URL;
@@ -54,6 +55,9 @@ function assertMutation(request: NextRequest) {
     const host = request.headers.get('host') ?? request.nextUrl.host;
     if (supplied.host !== host || supplied.protocol !== request.nextUrl.protocol) throw new HttpError(403, 'Cross-origin requests are not allowed.');
   }
+}
+function assertMutation(request: NextRequest) {
+  assertOrigin(request);
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) throw new HttpError(415, 'Send JSON data.');
 }
 async function input<T>(request: NextRequest, schema: z.ZodType<T>): Promise<T> {
@@ -88,13 +92,16 @@ function panelReview(draft: Draft, panel: ComicDraft['pages'][number]['panels'][
 function artworkReady(draft: Draft, panel: ComicDraft['pages'][number]['panels'][number]): boolean {
   return panel.storyRevision === draft.storyRevision && isPanelReady(panel) && !draft.operations?.[`panel:${panel.id}`];
 }
+function characterCardVersion(c:Character):string {
+  return createHash('sha256').update(JSON.stringify([c.id,c.name,c.role,c.appearance,c.outfit,c.approved,c.referenceAssetId ?? null])).digest('hex');
+}
 function view(draft: Draft, published: Edition | null, revision: number) {
   const reviewFingerprint = narrativeFingerprint(draft);
   const storyReview = draft.storyReviewRunId ? getStore().getAdvisoryReview(draft.id,`story:${draft.storyReviewRunId}:${draft.storyRevision}`) ?? draft.storyReview : draft.storyReview;
   return {
     id: draft.id, revision, title: draft.title, plot: draft.plot, style: draft.styleId, panelsPerPage:draft.panelsPerPage ?? 3, pageLayout:draft.pageLayout ?? 'stack',
     activePageJob:publicPageJob(getStore().activePageJob(draft.id,draft.ownerId)),
-    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: storyReview && typeof storyReview === 'object' ? {...storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
+    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null,cardVersion:characterCardVersion({...character,referenceAssetId}),referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: storyReview && typeof storyReview === 'object' ? {...storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
       status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => artworkReady(draft,p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
       panels: page.panels.map(p => {const review=panelReview(draft,p);return {id: p.id, description: p.beat, status: p.status === 'checking' && review ? 'needs_review' : p.status, evaluation: review?.findings.some((f:any)=>f?.severity==='blocker') ? 'blocker' : review?.findings.some((f:any)=>f?.severity==='warning') ? 'warning' : p.evaluation, reviewOutcome:review?.outcome ?? null, findings:review?.findings ?? [], ready:artworkReady(draft,p), accepted: !!p.acceptance && p.acceptance.assetId === p.assetId && p.acceptance.storyRevision === p.storyRevision && p.acceptance.panelRevision === p.revision, imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null};})})),
@@ -623,6 +630,40 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       return reply({comic});
       });
     }
+    if (segments[2] === 'characters' && segments.length === 6 && segments[4] === 'reference' && segments[5] === 'upload' && method === 'POST') {
+      assertOrigin(request);
+      if (data.pages.length) throw new HttpError(409, 'Character changes require a story revision.');
+      const character = data.characters.find(c => c.id === segments[3]);
+      if (!character) throw new HttpError(404, 'Character not found.');
+      if (data.operations?.[`character:${character.id}`]) throw new HttpError(409, 'This image request is already running or has an unknown outcome.');
+      const form = await readReferenceForm(request);
+      const allowed = ['image','appearance','outfit','expectedReferenceId','expectedCardVersion'];
+      if ([...form.keys()].some(key => !allowed.includes(key)) || allowed.some(key => form.getAll(key).length !== 1)) throw new HttpError(400, 'Please provide one image and its character details.');
+      const image = form.get('image');
+      const parsed = characterSchema.pick({appearance:true,outfit:true}).extend({expectedReferenceId:z.string().max(100),expectedCardVersion:z.string().regex(/^[a-f0-9]{64}$/)}).safeParse({appearance:form.get('appearance'),outfit:form.get('outfit'),expectedReferenceId:form.get('expectedReferenceId'),expectedCardVersion:form.get('expectedCardVersion')});
+      if (!(image instanceof File) || !parsed.success) throw new HttpError(400, 'Please check the image and character details.');
+      if (parsed.data.expectedReferenceId !== (character.referenceAssetId ?? '') || parsed.data.expectedCardVersion !== characterCardVersion(character)) throw new HttpError(409, 'The character card or reference changed. Review it before trying again.');
+      const bytes = await normalizeReference(image);
+      const latest = store.getOwned<Draft>(id,session);
+      if (!latest || latest.revision !== revision || latest.data.pages.length || latest.data.operations?.[`character:${character.id}`]) throw new HttpError(409, 'The draft changed. Refresh and try again.');
+      const assetId = await saveAsset(bytes);
+      const characters = latest.data.characters.map(c => c.id === character.id ? {...c,appearance:parsed.data.appearance,outfit:parsed.data.outfit,approved:false,referenceAssetId:assetId,referenceUrl:`/api/comics/${encodeURIComponent(id)}/assets/${assetId}`} : c);
+      const updated = {...latest.data,characters};
+      let attached: boolean;
+      try {attached=store.update(id,session,latest.revision,updated);}
+      catch (error) {
+        try {
+          const current=store.getOwned<Draft>(id,session);
+          if (current && !current.data.characters.some(c=>c.referenceAssetId===assetId) && !current.data.pages.some(page=>page.panels.some(p=>p.assetId===assetId))) await discardAsset(assetId);
+        } catch { /* Keep the new asset when attachment cannot be ruled out. */ }
+        throw error;
+      }
+      if (!attached) {
+        await discardAsset(assetId);
+        throw new HttpError(409, 'This draft changed. Refresh and try again.');
+      }
+      return reply({comic:view(updated,store.getPublished<Edition>(id),latest.revision+1)});
+    }
     if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') {
       await input(request, z.object({}).strict());
       if (data.pages.length) throw new HttpError(409, 'Character changes require a story revision.');
@@ -873,7 +914,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     if (method === 'POST') assertMutation(request);
     throw new HttpError(404, 'Not found.');
   } catch (error) {
-    if (error instanceof HttpError) return reply({error: error.message}, error.status);
+    if (error instanceof HttpError || error instanceof UploadError) return reply({error: error.message}, error.status);
     if (error instanceof ClaimInProgressError) return reply({error:error.message},409);
     if (error instanceof BudgetError) return reply({error: error.message, code:error.code}, error.code === 'budget_not_configured' ? 503 : 429);
     if (error instanceof AIError) return reply({error: error.message, code: error.code}, error.code === 'missing_key' ? 503 : error.code === 'invalid_input' ? 400 : 502);

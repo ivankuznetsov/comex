@@ -67,3 +67,5 @@ COMEX_DB_PATH=/path/to/comex.sqlite bun scripts/resolve-visual-review.ts COMIC_I
 ```
 
 This preserves the image and records a failed review for that exact image and version. The result remains advisory and the creator can continue using the saved image. No provider call is retried or refunded. Never run this command while a review may still be in flight.
+
+Before planning pages, character cards can use a generated reference or upload one static PNG, JPEG, or WebP up to 4 MiB and 16,777,216 pixels. Select “Upload a reference for new character” when adding a card to avoid generating an image first. Comex normalizes the upload to PNG and shows the saved preview. Review the appearance and outfit fields and approve that exact image before planning. Replacing a reference clears its approval; references cannot be replaced after pages are planned.
