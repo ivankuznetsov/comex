@@ -498,7 +498,7 @@ test('publication snapshots are isolated, pinned, and withdrawn', async () => {
     const published = await post(`comics/${comic.id}/publish`,{title:'Public comic',creator:'Mina'},cookie);
     expect(published.status).toBe(200);
     const reopened = await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id]);
-    expect((await reopened.json()).comic.publication).toEqual({title:'Public comic',creator:'Mina'});
+    expect((await reopened.json()).comic.publication).toMatchObject({title:'Public comic',creator:'Mina',editionId:expect.any(String)});
     const reader = await handleApi(request(`published/${comic.id}`),['published',comic.id]);
     const publicComic = (await reader.json()).comic;
     expect(publicComic.title).toBe('Public comic');

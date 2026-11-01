@@ -49,7 +49,8 @@ function repositoryContract(make:()=>Promise<{store:ComicRepository; close:()=>P
       expect(await store.getPublished('comic')).toEqual({title:'public'});
       expect(await store.getPublicationAsset('comic','page')).toEqual(new Uint8Array([1,2,3]));
       expect(await store.withdraw('comic','other')).toBe(false);
-      expect(await store.withdraw('comic','owner')).toBe(true);
+      expect(await store.withdraw('comic','owner',3)).toBe(false);
+      expect(await store.withdraw('comic','owner',4)).toBe(true);
       expect(await store.getPublished('comic')).toBeNull();
       expect(await store.getPublicationAsset('comic','page')).toBeNull();
       expect(await store.publish('comic','owner',4,{title:'stale'},[])).toBe(false);

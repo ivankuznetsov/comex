@@ -8,26 +8,32 @@ import {LocalStore, ClaimInProgressError} from './local-store';
 import {createBudgetedFetch, BudgetError} from './budget';
 import {createComicService} from './application/comics';
 import {ApplicationError, createSchema, parse} from './application/contracts';
+import type {PostgresAuth} from './storage/auth';
 export {validateStoryLedger} from './application/comics';
 
 class HttpError extends Error { constructor(readonly status:number, message:string) { super(message); } }
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
 function reply(data: unknown, status = 200) { return NextResponse.json(data, {status, headers: {'Cache-Control': 'no-store'}}); }
-function owner(request: NextRequest): string | null {
+type BrowserAuthStore = LocalStore | PostgresAuth;
+export type BrowserBackend = {
+  auth: BrowserAuthStore;
+  service: ReturnType<typeof createComicService>;
+  validateRequest(request: NextRequest): boolean;
+};
+async function owner(request: NextRequest, store: BrowserAuthStore): Promise<string | null> {
   const authenticated = request.cookies.get('comex_auth')?.value;
   if (authenticated && /^[a-f0-9]{64}$/.test(authenticated)) {
-    const identity = getStore().authIdentity(authenticated);
+    const identity = await store.authIdentity(authenticated);
     if (identity) return identity.owner;
   }
   const guest=request.cookies.get('comex_session')?.value;
   if (!guest || !/^[a-f0-9]{64}$/.test(guest)) return null;
-  const store=getStore();
-  const identity=store.guestIdentity(guest);
+  const identity=await store.guestIdentity(guest);
   if (identity) return identity.owner;
   // Existing drafts used the original random browser cookie as their owner.
   // Do not revive expired guests or treat current internal owner IDs as cookies.
-  return !store.hasGuestToken(guest) && store.hasLegacyOwner(guest) ? guest : null;
+  return !await store.hasGuestToken(guest) && await store.hasLegacyOwner(guest) ? guest : null;
 }
 function assertMutation(request: NextRequest) {
   const origin = request.headers.get('origin');
@@ -81,17 +87,19 @@ function serviceFor(store:LocalStore) {
 function imageResponse(bytes:Uint8Array, filename?:string) {
   return new NextResponse(new Uint8Array(bytes),{headers:{'Content-Type':'image/png',...(filename ? {'Content-Disposition':`attachment; filename="comex-page-${encodeURIComponent(filename)}.png"`} : {}),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 }
-export async function handleApi(request:NextRequest,segments:string[]) {
+export async function handleApi(request:NextRequest,segments:string[],backend?:BrowserBackend) {
   try {
-    ensureLocal(request);
-    const store=getStore();
+    if (backend) {
+      if (!backend.validateRequest(request)) throw new HttpError(403, 'Invalid application host.');
+    } else ensureLocal(request);
+    const store=backend?.auth ?? getStore();
     const method=request.method;
     if (segments[0] === 'auth') {
       if (segments.length === 2 && segments[1] === 'session' && method === 'GET') {
         const token = request.cookies.get('comex_auth')?.value;
-        const identity = token && /^[a-f0-9]{64}$/.test(token) ? store.authIdentity(token) : null;
+        const identity = token && /^[a-f0-9]{64}$/.test(token) ? await store.authIdentity(token) : null;
         const guestToken=request.cookies.get('comex_session')?.value;
-        const guest=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? store.guestIdentity(guestToken) : null;
+        const guest=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? await store.guestIdentity(guestToken) : null;
         return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null});
       }
       // Require Origin for these endpoints; never derive an email link from the Host header.
@@ -112,14 +120,14 @@ export async function handleApi(request:NextRequest,segments:string[]) {
         const validGuestToken=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? guestToken : null;
         // An explicit choice from the browser owning the guest cookie permits
         // correcting its email; account access still requires the emailed code.
-        if (claimGuest && (!validGuestToken || !store.updateGuestEmail(validGuestToken,email))) throw new HttpError(409,'This browser draft session has expired.');
-        const guestIdentity=validGuestToken ? store.guestIdentity(validGuestToken) : null;
-        const mayClaim=!!validGuestToken && (guestIdentity ? guestIdentity.email===email : !store.hasGuestToken(validGuestToken) && store.hasLegacyOwner(validGuestToken));
+        if (claimGuest && (!validGuestToken || !await store.updateGuestEmail(validGuestToken,email))) throw new HttpError(409,'This browser draft session has expired.');
+        const guestIdentity=validGuestToken ? await store.guestIdentity(validGuestToken) : null;
+        const mayClaim=!!validGuestToken && (guestIdentity ? guestIdentity.email===email : !await store.hasGuestToken(validGuestToken) && await store.hasLegacyOwner(validGuestToken));
         // The existing guest cookie is stable across simultaneous requests,
         // unlike login cookies whose responses can arrive out of order.
         const claimProof=mayClaim ? validGuestToken! : browser;
         const code=randomInt(100000000).toString().padStart(8,'0');
-        const issued=store.issueCode(email,code,claimProof,secret);
+        const issued=await store.issueCode(email,code,claimProof,secret);
         if (!issued) throw new HttpError(429,'Too many sign-in requests. Please try again later.');
         let delivered=false, knownRejected=false;
         try {
@@ -127,7 +135,7 @@ export async function handleApi(request:NextRequest,segments:string[]) {
           delivered=response.ok;
           knownRejected=response.status>=400 && response.status<500 && response.status!==408;
         } catch { /* Never log credentials or codes. */ }
-        if (!delivered) {store.invalidateCode(email,issued,knownRejected);throw new HttpError(502,'Could not send the sign-in email. Please try again.');}
+        if (!delivered) {await store.invalidateCode(email,issued,knownRejected);throw new HttpError(502,'Could not send the sign-in email. Please try again.');}
         const response=reply({message:'If the address can receive email, a sign-in code is on its way.'});
         response.cookies.set('comex_login',browser,{httpOnly:true,sameSite:'lax',secure:base.protocol==='https:',path:'/',maxAge:15*60});
         return response;
@@ -139,10 +147,10 @@ export async function handleApi(request:NextRequest,segments:string[]) {
         if (!secret || secret.length<32) throw new HttpError(503,'Email sign-in is not configured yet.');
         const browser=request.cookies.get('comex_login')?.value, guest=request.cookies.get('comex_session')?.value;
         const validGuest=guest && /^[a-f0-9]{64}$/.test(guest) ? guest : null;
-        const identity=validGuest ? store.guestIdentity(validGuest) : null;
-        const anonymous=validGuest ? identity ? identity.email===email ? identity.owner : null : !store.hasGuestToken(validGuest) && store.hasLegacyOwner(validGuest) ? validGuest : null : null;
+        const identity=validGuest ? await store.guestIdentity(validGuest) : null;
+        const anonymous=validGuest ? identity ? identity.email===email ? identity.owner : null : !await store.hasGuestToken(validGuest) && await store.hasLegacyOwner(validGuest) ? validGuest : null : null;
         const claimProof=anonymous && validGuest ? validGuest : browser && /^[a-f0-9]{64}$/.test(browser) ? browser : null;
-        const result=store.consumeCode(email,code,secret,claimProof,anonymous);
+        const result=await store.consumeCode(email,code,secret,claimProof,anonymous);
         if (!result) throw new HttpError(400,'This code is invalid, expired, or has already been used. Request a new code.');
         const response=reply({user:{email:result.email}});
         response.cookies.set('comex_auth',result.session,{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
@@ -155,14 +163,14 @@ export async function handleApi(request:NextRequest,segments:string[]) {
       if (segments.length === 2 && segments[1] === 'sign-out' && method === 'POST') {
         await input(request,z.object({}).strict());
         const token = request.cookies.get('comex_auth')?.value;
-        if (token && /^[a-f0-9]{64}$/.test(token)) store.signOut(token);
+        if (token && /^[a-f0-9]{64}$/.test(token)) await store.signOut(token);
         const response = reply({ok:true});
         response.cookies.set('comex_auth','',{httpOnly:true,sameSite:'lax',secure:request.nextUrl.protocol === 'https:',path:'/',maxAge:0});
         return response;
       }
       throw new HttpError(404, 'Not found.');
     }
-    const service=serviceFor(store);
+    const service=backend?.service ?? serviceFor(store as LocalStore);
     if (segments[0] === 'published' && method === 'GET') {
       if (segments.length === 4 && segments[2] === 'assets') return imageResponse(await service.getPublishedAsset(segments[1],segments[3],request.nextUrl.searchParams.get('edition')));
       if (segments.length === 1) return reply(await service.listPublished());
@@ -170,24 +178,24 @@ export async function handleApi(request:NextRequest,segments:string[]) {
     }
     if (segments[0] !== 'comics') throw new HttpError(404,'Not found.');
     if (segments.length === 1 && method === 'GET') {
-      const session=owner(request);
+      const session=await owner(request,store);
       if (!session) throw new HttpError(401,'Sign in to see your drafts.');
       return reply(await service.list(session));
     }
     if (segments.length === 1 && method === 'POST') {
       const body=parse(await input(request,z.unknown()),createSchema);
-      let session=owner(request); let guestToken:string | null=null;
+      let session=await owner(request,store); let guestToken:string | null=null;
       if (!session) {
         if (!body.email) throw new HttpError(401,'Enter your email to start creating.');
         const at=body.email.lastIndexOf('@'); const email=`${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}`;
-        const guest=store.createGuest(email); session=guest.owner; guestToken=guest.token;
+        const guest=await store.createGuest(email); session=guest.owner; guestToken=guest.token;
       }
       const response=reply(await service.create(session,body),201);
       if (guestToken) response.cookies.set('comex_session',guestToken,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
       return response;
     }
     if (segments.length < 2) throw new HttpError(404,'Not found.');
-    const id=segments[1], session=owner(request);
+    const id=segments[1], session=await owner(request,store);
     if (!session) throw new HttpError(404,'Comic not found.');
     if (segments.length === 2 && method === 'GET') return reply(await service.get(session,id));
     // Preserve the existing not-found boundary before parsing a mutation.

@@ -197,10 +197,10 @@ export class LocalStore {
       throw error;
     }
   }
-  withdraw(id: string, owner: string): boolean {
+  withdraw(id: string, owner: string, revision?: number): boolean {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const changed = Number(this.db.prepare('UPDATE comics SET edition=NULL,published_at=NULL,revision=revision+1 WHERE id=? AND owner=?').run(id, owner).changes) === 1;
+      const changed = Number(this.db.prepare('UPDATE comics SET edition=NULL,published_at=NULL,revision=revision+1 WHERE id=? AND owner=? AND (? IS NULL OR revision=?)').run(id, owner, revision ?? null, revision ?? null).changes) === 1;
       if (changed) this.db.prepare('DELETE FROM publication_assets WHERE comic_id=?').run(id);
       this.db.exec('COMMIT');
       return changed;

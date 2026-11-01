@@ -204,6 +204,10 @@ describe('shared comic application', () => {
       expect((await service.downloadPage(alice,id,'page1')).subarray(0,8)).toEqual(png.subarray(0,8));
       await service.publish(alice,id,{title:'Public story',creator:'Mina'});
       const edition=(await service.getPublished(id)).comic;
+      expect((await service.get(alice,id)).comic.publication?.editionId).toBe(edition.editionId);
+      await expect(service.publish(alice,id,{title:'Stale edition',creator:'Mina',expectedEditionId:'wrong'})).rejects.toMatchObject({code:'conflict'});
+      await expect(service.withdraw(alice,id,{expectedEditionId:'wrong'})).rejects.toMatchObject({code:'conflict'});
+      expect((await service.getPublished(id)).comic).toEqual(edition);
       const url=new URL(edition.pages[0].imageUrl,'http://localhost');
       const publicBytes=await service.getPublishedAsset(id,url.pathname.split('/').pop()!,url.searchParams.get('edition'));
       const legacy=local.getOwned<any>(id,alice)!;

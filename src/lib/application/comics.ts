@@ -817,6 +817,8 @@ export function createComicService(deps: ComicDependencies) {
     async function publish(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
         const body = parse(payload, publishSchema);
+        if (body.expectedEditionId !== undefined && ((await store.getPublished<Edition>(id))?.editionId ?? null) !== body.expectedEditionId)
+            throw new ApplicationError('conflict', 'The published edition changed. Refresh and review it again.');
         const updated = { ...data, title: body.title, creatorName: body.creator };
         if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !p.assetId || p.storyRevision !== updated.storyRevision || !isPanelReady(p))))
             throw new ApplicationError('conflict', 'All current panels must be generated and reviewed before publishing.');
@@ -835,8 +837,11 @@ export function createComicService(deps: ComicDependencies) {
     }
     async function withdraw(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
-        parse(payload, z.object({}).strict());
-        (await store.withdraw(id, session));
+        const body = parse(payload, z.object({expectedEditionId:short.nullable().optional()}).strict());
+        if (body.expectedEditionId !== undefined && ((await store.getPublished<Edition>(id))?.editionId ?? null) !== body.expectedEditionId)
+            throw new ApplicationError('conflict', 'The published edition changed. Refresh and review it again.');
+        if (!(await store.withdraw(id, session, revision)))
+            throw new ApplicationError('conflict', 'Draft changed while withdrawing; refresh and try again.');
         return ({ comic: view(data, null, revision + 1) });
     }
     return { listStyles, create, list, get, getAsset, listPublished, getPublished, getPublishedAsset, update, initialQuestions, refreshQuestions, suggestCharacters, acceptStoryReview, approveStory, planStory, generateReference, addCharacter, editCharacter: (actor: Actor, id: string, characterId: string, input: unknown, expectedRevision?: number) => changeCharacter(actor, id, characterId, input, 'PATCH', expectedRevision), removeCharacter: (actor: Actor, id: string, characterId: string, input: unknown = {}, expectedRevision?: number) => changeCharacter(actor, id, characterId, input, 'DELETE', expectedRevision), approveCharacter, previewRevision, applyRevision, downloadPage, generatePage, editPanel, acceptPanel, publish, withdraw };

@@ -64,9 +64,9 @@ export class PostgresRepository implements ComicRepository {
       return true;
     });
   }
-  async withdraw(id:string,owner:string):Promise<boolean> {
+  async withdraw(id:string,owner:string,revision?:number):Promise<boolean> {
     return transaction(this.pool,async c=>{
-      const changed=await c.query('UPDATE comics SET edition=NULL,published_at=NULL,revision=revision+1 WHERE id=$1 AND owner=$2 AND import_batch_id IS NULL',[id,owner]);
+      const changed=await c.query('UPDATE comics SET edition=NULL,published_at=NULL,revision=revision+1 WHERE id=$1 AND owner=$2 AND import_batch_id IS NULL AND ($3::integer IS NULL OR revision=$3)',[id,owner,revision??null]);
       if(changed.rowCount) await c.query('DELETE FROM publication_assets WHERE comic_id=$1',[id]);
       return changed.rowCount===1;
     });
