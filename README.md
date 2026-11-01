@@ -27,7 +27,7 @@ bun run build
 
 ## Scope and status
 
-The local build includes draft creation, character cards, continuity checks and publication machinery. Some generation and edit paths may remain incomplete; consult the verification results before relying on them. LLM findings are advisory until calibrated against real examples. Forking comics is future scope.
+The local build includes draft creation, character cards, continuity checks and publication machinery. It automatically asks story questions and suggests editable character cards; selecting and adding a card starts its reference image. Questions, suggestions, and images each use provider calls. Suggested character prompts have mock coverage but have not yet been validated against a live provider. Some generation and edit paths may remain incomplete; consult the verification results before relying on them. LLM findings are advisory until calibrated against real examples. Forking comics is future scope.
 
 SQLite and local asset storage are for local development only. Deployment, hosted storage, durable jobs, and 1Password-to-GitHub-to-Vercel secret synchronization remain unverified. No production deployment has been made.
 

@@ -12,7 +12,7 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByLabel('What happens in your story?').fill('Mina delivers a clockwork bird carrying a key across London.');
   await page.getByRole('button', { name: /Start creating/ }).click();
   await expect(page).toHaveURL(/\/comics\//);
-  await page.getByRole('button', { name: 'Ask story questions' }).click();
+  await expect(page.getByLabel('What does Mina want?')).toBeVisible();
   await page.getByLabel('What does Mina want?').fill('Deliver the key safely');
   await page.getByLabel('name', { exact: true }).fill('Mina');
   await page.getByLabel('role', { exact: true }).fill('Courier');
@@ -20,7 +20,6 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await page.getByLabel('outfit', { exact: true }).fill('Yellow coat');
   await page.getByRole('button', { name: 'Add character' }).click();
   await expect(page.getByLabel('What does Mina want?')).toHaveValue('Deliver the key safely');
-  await page.getByRole('button', { name: 'Create reference' }).click();
   await expect(page.getByAltText('Reference for Mina')).toBeVisible();
   await page.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(page.getByText('Approved', { exact:true })).toBeVisible();

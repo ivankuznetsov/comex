@@ -7,3 +7,5 @@ Documentation-backed rationale, checked in the prior planning session: the [imag
 For each tool or API trial, record template version, model ID and snapshot, prompt inputs, ordered reference roles and asset hashes, output hashes, exact settings, start/end times, latency, usage/cost if available, failures, and a human assessment. Label a result `tool-tested` only when an actual tool result was inspected, and `api-tested` only for the named API model/account. Keep untrusted/private prompts and generated assets out of the public repository unless deliberately sanitized for the demo. Document refusals and failed/inconclusive trials; do not convert them into passing results.
 
 The narrative fixtures under `evals/fixtures/story/` are manually authored proposed gold cases, not evaluator results. The image corpus and evaluator calibration remain unperformed.
+
+The later instructions to inspect specific prop actions and outcomes in the visual and narrative judges are proposed changes responding to a missed key-action error. They have not yet been evaluated against a labelled live image corpus; they do not establish that the checker can reliably detect that error.

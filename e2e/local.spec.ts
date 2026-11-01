@@ -11,6 +11,13 @@ test('creator can save a private local draft and another browser cannot read it'
   await page.getByRole('button', { name: /Start creating/ }).click();
   await expect(page).toHaveURL(/\/comics\//);
   await expect(page.getByText('Mina delivers a clockwork bird', { exact: false })).toBeVisible();
+  await page.getByLabel('Panels per page').selectOption('4');
+  await expect(page.getByLabel('Panels per page')).toHaveValue('4');
+  await page.getByLabel('Page layout').selectOption('grid');
+  await expect(page.getByLabel('Page layout')).toHaveValue('grid');
+  await page.reload();
+  await expect(page.getByLabel('Panels per page')).toHaveValue('4');
+  await expect(page.getByLabel('Page layout')).toHaveValue('grid');
   const draftUrl = page.url();
   await page.getByLabel('name', { exact: true }).fill('Mina');
   await page.getByLabel('role', { exact: true }).fill('Courier');

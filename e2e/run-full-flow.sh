@@ -28,5 +28,5 @@ for ((i=0; i<100; i++)); do
   sleep 0.2
 done
 curl -fsS "http://127.0.0.1:$qa_port/" >/dev/null
-COMEX_E2E_FAKE_PROVIDER=1 COMEX_E2E_MAILBOX="$qa_dir/mailbox" COMEX_TEST_URL="http://127.0.0.1:$qa_port" \
+COMEX_E2E_FAKE_PROVIDER=1 COMEX_E2E_MAILBOX="$qa_dir/mailbox" COMEX_E2E_BUDGET_DB="$qa_dir/budget.sqlite" COMEX_TEST_URL="http://127.0.0.1:$qa_port" \
   bun run test:e2e --workers=1 --reporter=line

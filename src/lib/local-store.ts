@@ -59,6 +59,12 @@ export class LocalStore {
   hasGuestToken(token:string): boolean {
     return !!this.db.prepare('SELECT 1 FROM auth_guests WHERE token_hash=?').get(hash(token));
   }
+  /** Legacy browser sessions used their bearer token directly as draft owner. */
+  hasLegacyOwner(owner:string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM comics c WHERE c.owner=?
+      AND NOT EXISTS(SELECT 1 FROM auth_users u WHERE u.owner=c.owner)
+      AND NOT EXISTS(SELECT 1 FROM auth_guests g WHERE g.owner=c.owner) LIMIT 1`).get(owner);
+  }
   updateGuestEmail(token:string,email:string,now=Date.now()): boolean {
     return Number(this.db.prepare('UPDATE auth_guests SET email=? WHERE token_hash=? AND expires_at>?').run(email,hash(token),now).changes)===1;
   }

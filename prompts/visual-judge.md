@@ -8,6 +8,8 @@ Independently compare each labelled source panel to its beat and approved refere
 
 These are unlettered source images: dialogue, captions and speech balloons are added during page assembly. Do not report missing dialogue, lettering or speech balloons as defects, and do not suggest drawing them into the panel.
 
+Check the depicted story action separately from character likeness and style. For each important visible prop, compare who holds it, what they physically do with it, and the intended target and result against this panel's beat and state. For example, using a key on the wrong object is an action mismatch even if the character looks correct. Cite the visible evidence; if the hand, object or target is hidden, report uncertainty rather than claiming the action happened or failed.
+
 ## User template
 
 Approved bible: {{approved_bible}}

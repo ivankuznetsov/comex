@@ -28,7 +28,7 @@ test('creators correct and remove character cards before planning', async ({ pag
   await name.fill('Mira'); await appearance.fill('Red hair');
   await page.getByRole('button',{name:'Save character'}).click();
   await expect(page.getByRole('heading',{name:'Mira'})).toBeVisible();
-  await expect(page.getByText('Red hair')).toBeVisible();
+  await expect(page.getByText('Red hair',{exact:true})).toBeVisible();
   await expect(page.getByRole('heading',{name:'Bird'})).toBeVisible();
   page.once('dialog', dialog => dialog.accept());
   await page.locator('article').filter({has:page.getByRole('heading',{name:'Mira'})}).getByRole('button',{name:'Remove'}).click();

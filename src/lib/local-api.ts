@@ -13,7 +13,8 @@ import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseSt
 
 type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string; referenceAssetId?: string; approved: boolean};
 type PanelReview = {assetId:string; storyRevision:number; panelRevision:number; outcome:'pass' | 'findings' | 'inconclusive' | 'failed'};
-type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; storyboard?: Storyboard; storyReview?: unknown; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>};
+type SuggestedCharacter = {id:string; name:string; role:string; appearance:string; outfit:string};
+type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; initialQuestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; characterSuggestions?: SuggestedCharacter[]; initialSuggestions?: 'pending' | 'running' | 'complete' | 'failed' | 'unknown'; panelsPerPage?: number; pageLayout?: 'stack' | 'grid'; storyboard?: Storyboard; storyReview?: unknown; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; pendingArtworkDecision?: {id:string;panelId:string;instruction:string;assetId:string;storyRevision:number;panelRevision:number;expiresAt:number}; panelFindings?: Record<string, unknown[]>; panelReviews?: Record<string, PanelReview>; operations?: Record<string, 'running' | 'unknown_outcome'>};
 type Edition = {id: string; title: string; creator: string; editionId: string; sourceRevision: number; pages: {id: string; imageUrl: string; storage?: 'sqlite'}[]};
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
@@ -21,7 +22,7 @@ const ai = () => createAIService({fetch:createBudgetedFetch(process.env.COMEX_BU
 const styles = z.enum(['clear-line-adventure', 'ink-manga', 'painted-storybook']);
 const short = z.string().trim().min(1).max(300);
 const createSchema = z.object({title: short, plot: z.string().trim().min(1).max(4000), style: styles, email:z.string().trim().email().max(254).optional()}).strict();
-const patchSchema = z.object({title: short.optional(), plot: z.string().trim().min(1).max(4000).optional(), style: styles.optional(), answers: z.record(z.string().max(100), z.string().max(1000)).optional()}).strict();
+const patchSchema = z.object({title: short.optional(), plot: z.string().trim().min(1).max(4000).optional(), style: styles.optional(), answers: z.record(z.string().max(100), z.string().max(1000)).optional(), panelsPerPage:z.number().int().min(2).max(4).optional(), pageLayout:z.enum(['stack','grid']).optional()}).strict();
 const characterSchema = z.object({name: short, role: short, appearance: z.string().trim().min(1).max(1000), outfit: z.string().trim().min(1).max(1000)}).strict();
 const panelVersionSchema = z.object({assetId:z.string().uuid(),storyRevision:z.number().int().positive(),panelRevision:z.number().int().positive()}).strict();
 const publishSchema = z.object({title: short, creator: z.string().trim().max(100)}).strict();
@@ -34,7 +35,13 @@ function owner(request: NextRequest): string | null {
     if (identity) return identity.owner;
   }
   const guest=request.cookies.get('comex_session')?.value;
-  return guest && /^[a-f0-9]{64}$/.test(guest) ? getStore().guestIdentity(guest)?.owner ?? null : null;
+  if (!guest || !/^[a-f0-9]{64}$/.test(guest)) return null;
+  const store=getStore();
+  const identity=store.guestIdentity(guest);
+  if (identity) return identity.owner;
+  // Existing drafts used the original random browser cookie as their owner.
+  // Do not revive expired guests or treat current internal owner IDs as cookies.
+  return !store.hasGuestToken(guest) && store.hasLegacyOwner(guest) ? guest : null;
 }
 function assertMutation(request: NextRequest) {
   const origin = request.headers.get('origin');
@@ -72,8 +79,8 @@ function reviewOutcome(draft: Draft, panel: ComicDraft['pages'][number]['panels'
 function view(draft: Draft, published: Edition | null, revision: number) {
   const reviewFingerprint = narrativeFingerprint(draft);
   return {
-    id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId,
-    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null})), questions: draft.questions, answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
+    id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId, panelsPerPage:draft.panelsPerPage ?? 3, pageLayout:draft.pageLayout ?? 'stack',
+    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
       status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => p.storyRevision === draft.storyRevision && isPanelReady(p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
       panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, reviewOutcome:reviewOutcome(draft,p), findings: reviewOutcome(draft,p) ? draft.panelFindings?.[p.id] ?? [] : [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null}))})),
@@ -272,6 +279,9 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
 function xml(value: string): string { if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]/u.test(value)) throw new HttpError(400,'Dialogue includes a character that cannot be rendered.'); return value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;'); }
 async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]> {
   if (!draft.storyboard) throw new HttpError(409, 'The storyboard is missing.');
+  const grid = draft.pageLayout === 'grid';
+  const panelWidth = grid ? 480 : 980;
+  const panelHeight = grid ? 260 : 420;
   const orderedSpecs = new Map(draft.storyboard.pages.flatMap(p => p.panels).map(p => [p.id,p]));
   const result: {id:string;image:Buffer}[] = [];
   for (const page of draft.pages) {
@@ -279,27 +289,33 @@ async function composePages(draft: Draft): Promise<{id: string; image: Buffer}[]
     for (const panel of page.panels) {
       const spec = orderedSpecs.get(panel.id);
       if (!panel.assetId || !spec) throw new HttpError(409, 'A page is missing its current panel.');
-      const image = await sharp(await asset(panel.assetId)).resize(980,420,{fit:'contain',background:'#fffef8'}).png().toBuffer();
+      const image = await sharp(await asset(panel.assetId)).resize(panelWidth,panelHeight,{fit:'contain',background:'#fffef8'}).png().toBuffer();
       const lines: string[] = [];
       for (const dialogue of spec.dialogue) {
         const name = draft.characters.find(c => c.id === dialogue.speaker_id)?.name ?? dialogue.speaker_id;
-        lines.push(...wrapDialogue(`${name}: ${dialogue.text}`, 25));
+        lines.push(...wrapDialogue(`${name}: ${dialogue.text}`, grid ? 17 : 25));
       }
       sections.push({image,lines});
     }
-    const height = 20 + sections.reduce((sum,s) => sum + 420 + (s.lines.length ? s.lines.length*30+24 : 0) + 20,0);
+    const rows = grid ? Array.from({length:Math.ceil(sections.length/2)},(_,i)=>sections.slice(i*2,i*2+2)) : sections.map(section=>[section]);
+    const height = 20 + rows.reduce((sum,row) => sum + Math.max(...row.map(s => panelHeight + (s.lines.length ? s.lines.length*30+24 : 0))) + 20,0);
     if (height > 12000) throw new HttpError(400,'The page has too much dialogue to compose.');
     const composites: {input:Buffer;top:number;left:number}[] = [];
     let y = 20;
-    for (const section of sections) {
-      composites.push({input:section.image,top:y,left:20}); y += 420;
-      if (section.lines.length) {
-        const h = section.lines.length*30+24;
-        const lines = section.lines.map((line,i) => `<text x="12" y="${26+i*30}" font-family="sans-serif" font-size="22" fill="#171717" xml:space="preserve">${xml(line)}</text>`).join('');
-        const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="980" height="${h}"><rect width="980" height="${h}" fill="white" stroke="#171717" stroke-width="3"/>${lines}</svg>`);
-        composites.push({input:svg,top:y,left:20}); y += h;
-      }
-      y += 20;
+    for (const row of rows) {
+      let rowHeight = panelHeight;
+      row.forEach((section,column) => {
+        const x = 20 + column * (panelWidth + 20);
+        composites.push({input:section.image,top:y,left:x});
+        if (section.lines.length) {
+          const h = section.lines.length*30+24;
+          const lines = section.lines.map((line,i) => `<text x="12" y="${26+i*30}" font-family="sans-serif" font-size="22" fill="#171717" xml:space="preserve">${xml(line)}</text>`).join('');
+          const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${panelWidth}" height="${h}"><rect width="${panelWidth}" height="${h}" fill="white" stroke="#171717" stroke-width="3"/>${lines}</svg>`);
+          composites.push({input:svg,top:y+panelHeight,left:x});
+          rowHeight = Math.max(rowHeight,panelHeight+h);
+        }
+      });
+      y += rowHeight + 20;
     }
     const image = await sharp({create:{width:1020,height,channels:4,background:'#fff8e8'}}).composite(composites).png().toBuffer();
     result.push({id:page.id,image});
@@ -348,7 +364,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         // correcting its email; account access still requires the emailed code.
         if (claimGuest && (!validGuestToken || !store.updateGuestEmail(validGuestToken,email))) throw new HttpError(409,'This browser draft session has expired.');
         const guestIdentity=validGuestToken ? store.guestIdentity(validGuestToken) : null;
-        const mayClaim=!!validGuestToken && (guestIdentity ? guestIdentity.email===email : !store.hasGuestToken(validGuestToken));
+        const mayClaim=!!validGuestToken && (guestIdentity ? guestIdentity.email===email : !store.hasGuestToken(validGuestToken) && store.hasLegacyOwner(validGuestToken));
         // The existing guest cookie is stable across simultaneous requests,
         // unlike login cookies whose responses can arrive out of order.
         const claimProof=mayClaim ? validGuestToken! : browser;
@@ -374,7 +390,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         const browser=request.cookies.get('comex_login')?.value, guest=request.cookies.get('comex_session')?.value;
         const validGuest=guest && /^[a-f0-9]{64}$/.test(guest) ? guest : null;
         const identity=validGuest ? store.guestIdentity(validGuest) : null;
-        const anonymous=validGuest ? identity ? identity.email===email ? identity.owner : null : store.hasGuestToken(validGuest) ? null : validGuest : null;
+        const anonymous=validGuest ? identity ? identity.email===email ? identity.owner : null : !store.hasGuestToken(validGuest) && store.hasLegacyOwner(validGuest) ? validGuest : null : null;
         const claimProof=anonymous && validGuest ? validGuest : browser && /^[a-f0-9]{64}$/.test(browser) ? browser : null;
         const result=store.consumeCode(email,code,secret,claimProof,anonymous);
         if (!result) throw new HttpError(400,'This code is invalid, expired, or has already been used. Request a new code.');
@@ -434,7 +450,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         const guest=store.createGuest(email); session=guest.owner; guestToken=guest.token;
       }
       const id = randomUUID();
-      const draft: Draft = {...createBlankComic(id, session), title: body.title, plot: body.plot, styleId: body.style, characters: [], answers: {}, questions: []};
+      const draft: Draft = {...createBlankComic(id, session), title: body.title, plot: body.plot, styleId: body.style, characters: [], answers: {}, questions: [], initialQuestions:'pending',initialSuggestions:'pending'};
       store.create(id, session, draft);
       const response=reply({comic: {id}}, 201);
       if (guestToken) response.cookies.set('comex_session',guestToken,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
@@ -453,12 +469,39 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       const body = await input(request, patchSchema);
       if (data.pages.length && ((body.plot !== undefined && body.plot !== data.plot) || (body.style !== undefined && body.style !== data.styleId) || (body.answers !== undefined && JSON.stringify(body.answers) !== JSON.stringify(data.answers))))
         throw new HttpError(409, 'Change the story through the revision flow so later pages can be updated.');
-      const updated: Draft = {...data, title: body.title ?? data.title, plot: body.plot ?? data.plot, styleId: body.style ?? data.styleId, answers: body.answers ?? data.answers};
+      if (data.pages.length && body.panelsPerPage !== undefined && body.panelsPerPage !== (data.panelsPerPage ?? 3)) throw new HttpError(409, 'Choose the number of panels before planning the story.');
+      const updated: Draft = {...data, title: body.title ?? data.title, plot: body.plot ?? data.plot, styleId: body.style ?? data.styleId, answers: body.answers ?? data.answers, panelsPerPage:body.panelsPerPage ?? data.panelsPerPage, pageLayout:body.pageLayout ?? data.pageLayout};
       return reply({comic: save(store, session, revision, updated)});
+    }
+    if (segments[2] === 'questions' && segments[3] === 'initial' && segments.length === 4 && method === 'POST') {
+      await input(request, z.object({}).strict());
+      if (data.initialQuestions !== 'pending') return reply({comic:view(data,store.getPublished<Edition>(id),revision)});
+      return await withTextOperation(store,session,id,revision,async () => {
+        if (!store.update(id,session,revision,{...data,initialQuestions:'running'})) throw new HttpError(409,'Draft changed before asking questions.');
+        try {
+          const generated = await ai().questions({plot:data.plot,style:data.styleId,answers:answeredQuestions(data),limit:5});
+          const seen = new Set<string>();
+          const questions = generated.filter(question => {const key=question.question.trim().toLocaleLowerCase('en-US');if(seen.has(key))return false;seen.add(key);return true;}).map(question => ({...question,id:randomUUID()}));
+          for (let attempt=0;attempt<3;attempt++) {
+            const latest=store.getOwned<Draft>(id,session);
+            if (!latest || latest.data.initialQuestions !== 'running' || latest.data.plot !== data.plot || latest.data.styleId !== data.styleId || JSON.stringify(latest.data.questions) !== JSON.stringify(data.questions) || JSON.stringify(latest.data.answers) !== JSON.stringify(data.answers)) throw new HttpError(409,'Story changed while finding questions.');
+            const updated={...latest.data,questions,initialQuestions:'complete' as const};
+            if (store.update(id,session,latest.revision,updated)) return reply({comic:view(updated,store.getPublished<Edition>(id),latest.revision+1)});
+          }
+          throw new HttpError(409,'Draft changed while saving questions.');
+        } catch(error) {
+          const latest=store.getOwned<Draft>(id,session);
+          if (latest?.data.initialQuestions === 'running') {
+            const unknown=error instanceof AIError && (error.code === 'unknown_outcome' || error.code === 'invalid_response');
+            store.update(id,session,latest.revision,{...latest.data,initialQuestions:unknown?'unknown':'failed'});
+          }
+          throw error;
+        }
+      });
     }
     if (segments[2] === 'questions' && segments.length === 3 && method === 'POST') {
       await input(request, z.object({}).strict());
-      return await withTextOperation(store,session,id,revision,async () => {
+      try { return await withTextOperation(store,session,id,revision,async () => {
       const answered = data.questions.filter(question => data.answers[question.id]?.trim());
       const limit = Math.max(0, 5 - answered.length);
       const additions = limit ? await ai().questions({plot:data.plot, style:data.styleId, answers:answeredQuestions(data), limit}) : [];
@@ -469,7 +512,43 @@ export async function handleApi(request: NextRequest, segments: string[]) {
         if (!seen.has(key)) { seen.add(key); questions.push({...question,id:randomUUID()}); }
       }
       const answers = Object.fromEntries(answered.map(question => [question.id,data.answers[question.id]]));
-      return reply({comic: save(store, session, revision, {...data, questions, answers})});
+      return reply({comic: save(store, session, revision, {...data, questions, answers, initialQuestions:'complete'})});
+      }); } catch(error) {
+        if (error instanceof AIError && (error.code === 'unknown_outcome' || error.code === 'invalid_response')) {
+          const latest=store.getOwned<Draft>(id,session);
+          if (latest) store.update(id,session,latest.revision,{...latest.data,initialQuestions:'unknown'});
+        }
+        throw error;
+      }
+    }
+    if (segments[2] === 'characters' && segments[3] === 'suggestions' && segments.length === 4 && method === 'POST') {
+      const body = await input(request,z.object({retry:z.boolean().optional()}).strict());
+      if (data.pages.length) throw new HttpError(409,'Character changes require a story revision.');
+      if (data.initialQuestions === 'running' || data.initialQuestions === 'pending') throw new HttpError(409,'Wait for story questions first.');
+      if (data.initialSuggestions === 'unknown') throw new HttpError(409,'Resolve the previous character suggestion request before trying again.');
+      if (data.initialSuggestions === 'running' || (data.initialSuggestions === 'complete' && !body.retry)) return reply({comic:view(data,store.getPublished<Edition>(id),revision)});
+      if (data.initialSuggestions !== 'pending' && !body.retry) return reply({comic:view(data,store.getPublished<Edition>(id),revision)});
+      return await withTextOperation(store,session,id,revision,async () => {
+        if (!store.update(id,session,revision,{...data,initialSuggestions:'running'})) throw new HttpError(409,'Draft changed before suggesting characters.');
+        try {
+          const generated = await ai().characterSuggestions({plot:data.plot,style:data.styleId,answers:answeredQuestions(data),existingCharacters:data.characters.map(({name,role}) => ({name,role}))});
+          const seen=new Set<string>();
+          const characterSuggestions=generated.filter(card => {const key=card.name.toLocaleLowerCase('en-US');if(seen.has(key))return false;seen.add(key);return true;}).map(card => ({id:randomUUID(),...card}));
+          for (let attempt=0;attempt<3;attempt++) {
+            const latest=store.getOwned<Draft>(id,session);
+            if (!latest || latest.data.initialSuggestions !== 'running' || latest.data.pages.length || latest.data.plot !== data.plot || latest.data.styleId !== data.styleId || JSON.stringify(latest.data.questions) !== JSON.stringify(data.questions) || JSON.stringify(latest.data.answers) !== JSON.stringify(data.answers)) throw new HttpError(409,'Story changed while suggesting characters.');
+            const updated={...latest.data,characterSuggestions,initialSuggestions:'complete' as const};
+            if (store.update(id,session,latest.revision,updated)) return reply({comic:view(updated,store.getPublished<Edition>(id),latest.revision+1)});
+          }
+          throw new HttpError(409,'Draft changed while saving character suggestions.');
+        } catch(error) {
+          const latest=store.getOwned<Draft>(id,session);
+          if (latest?.data.initialSuggestions === 'running') {
+            const unknown=error instanceof AIError && (error.code === 'unknown_outcome' || error.code === 'invalid_response');
+            store.update(id,session,latest.revision,{...latest.data,initialSuggestions:unknown?'unknown':'failed'});
+          }
+          throw error;
+        }
       });
     }
     if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') {
@@ -484,7 +563,7 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (!data.characters.length || data.characters.some(c => !c.approved || !c.referenceAssetId)) throw new HttpError(409, 'Approve reference images for every selected character first.');
       if (data.characters.some(c => data.operations?.[`character:${c.id}`])) throw new HttpError(409, 'Resolve character reference requests before planning the story.');
       return await withTextOperation(store,session,id,revision,async () => {
-      const generated = await ai().storyboard({plot:data.plot, answers:answeredQuestions(data), styleRules:styleRules(data.styleId), characters:data.characters, pageCount:3, panelsPerPage:3});
+      const generated = await ai().storyboard({plot:data.plot, answers:answeredQuestions(data), styleRules:styleRules(data.styleId), characters:data.characters, pageCount:3, panelsPerPage:data.panelsPerPage ?? 3});
       const storyboard = {...generated,pages:generated.pages.map(page => ({...page,panels:page.panels.map(normalizePanelLedger)}))};
       const ledgerErrors = validateStoryLedger(storyboard);
       if (ledgerErrors.length) throw new HttpError(422, `Story state needs correction: ${ledgerErrors[0]}`);
@@ -563,8 +642,12 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       return reply({comic: save(store, session, revision, {...data, characters: data.characters.map(c => c.id === character.id ? {...c, approved: true} : c)})});
     }
     if (segments[2] === 'revisions' && segments[3] === 'preview' && segments.length === 4 && method === 'POST') {
-      const body = await input(request, z.object({panelId:short,instruction:z.string().trim().min(1).max(4000)}).strict());
+      const body = await input(request, z.object({panelId:short,instruction:z.string().trim().min(1).max(4000),reviewedVersion:panelVersionSchema.optional()}).strict());
       if (!data.storyboard) throw new HttpError(409,'Plan the story before revising it.');
+      if (body.reviewedVersion) {
+        const reviewed = data.pages.flatMap(page => page.panels).find(panel => panel.id === body.panelId);
+        if (!reviewed || reviewed.assetId !== body.reviewedVersion.assetId || reviewed.storyRevision !== body.reviewedVersion.storyRevision || reviewed.revision !== body.reviewedVersion.panelRevision || data.storyRevision !== body.reviewedVersion.storyRevision) throw new HttpError(409, 'This panel changed since you viewed it. Refresh and review the current image.');
+      }
       const currentStoryboard = data.storyboard;
       return await withTextOperation(store,session,id,revision,async () => {
       const generated = await ai().revision({storyboard:currentStoryboard,firstPanelId:body.panelId,instruction:body.instruction,characters:data.characters});
@@ -667,14 +750,40 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision+1)});
     }
     if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'edit' && method === 'POST') {
-      const body = await input(request,panelVersionSchema.extend({instruction:z.string().trim().min(1).max(2000)}).strict());
+      const body = await input(request,z.union([
+        panelVersionSchema.extend({instruction:z.string().trim().min(1).max(2000)}).strict(),
+        z.object({proposalId:z.string().uuid(),decision:z.literal('artwork_only')}).strict(),
+      ]));
       requireClearNarrative(data);
       const panel = data.pages.flatMap(page => page.panels).find(panel => panel.id === segments[3]);
       if (!panel || !panel.assetId || panel.storyRevision !== data.storyRevision || (panel.status === 'outdated' || panel.status === 'checking')) throw new HttpError(409,'Generate the current panel before editing its artwork.');
-      if (panel.assetId !== body.assetId || panel.revision !== body.panelRevision || panel.storyRevision !== body.storyRevision) throw new HttpError(409,'This panel changed since you viewed it. Refresh and review the current image.');
-      const intent = await ai().classifyEdit({instruction:body.instruction,panelContext:panel.beat});
-      if (intent.intent !== 'artwork') throw new HttpError(409,`This change may affect the story. Use Change the story instead. ${intent.reason}`);
-      await renderPanel(store,session,id,panel.id,body.instruction,body);
+      let instruction:string, reviewed:z.infer<typeof panelVersionSchema>;
+      if ('proposalId' in body) {
+        const proposal=data.pendingArtworkDecision;
+        if (!proposal || proposal.id !== body.proposalId || proposal.panelId !== panel.id || proposal.expiresAt <= Date.now()) throw new HttpError(409,'This edit choice has expired. Review the edit again.');
+        reviewed={assetId:proposal.assetId,storyRevision:proposal.storyRevision,panelRevision:proposal.panelRevision}; instruction=proposal.instruction;
+        if (panel.assetId !== reviewed.assetId || panel.revision !== reviewed.panelRevision || panel.storyRevision !== reviewed.storyRevision) throw new HttpError(409,'This panel changed since you viewed it. Refresh and review the current image.');
+        const {pendingArtworkDecision: _, ...rest}=data; void _;
+        if (!store.update(id,session,revision,rest)) throw new HttpError(409,'This draft changed. Refresh and review the edit again.');
+      } else {
+        reviewed={assetId:body.assetId,storyRevision:body.storyRevision,panelRevision:body.panelRevision}; instruction=body.instruction;
+        if (panel.assetId !== reviewed.assetId || panel.revision !== reviewed.panelRevision || panel.storyRevision !== reviewed.storyRevision) throw new HttpError(409,'This panel changed since you viewed it. Refresh and review the current image.');
+        const spec=data.storyboard?.pages.flatMap(page=>page.panels).find(item=>item.id===panel.id);
+        const intent=await withTextOperation(store,session,id,revision,async()=>{
+          const decision=await ai().classifyEdit({instruction,panelContext:JSON.stringify({beat:panel.beat,bible:data.storyboard?.bible,scene:spec})});
+          const latest=store.getOwned<Draft>(id,session);
+          const current=latest?.data.pages.flatMap(page=>page.panels).find(item=>item.id===panel.id);
+          if (!latest || !current || current.assetId !== reviewed.assetId || current.revision !== reviewed.panelRevision || current.storyRevision !== reviewed.storyRevision || latest.data.storyRevision !== reviewed.storyRevision) throw new HttpError(409,'This panel changed while checking the edit. Refresh and review the current image.');
+          if (decision.intent === 'uncertain') {
+            const proposal={id:randomUUID(),panelId:panel.id,instruction,...reviewed,expiresAt:Date.now()+15*60*1000};
+            if (!store.update(id,session,latest.revision,{...latest.data,pendingArtworkDecision:proposal})) throw new HttpError(409,'Draft changed while checking the edit. Refresh and try again.');
+            return {...decision,proposalId:proposal.id};
+          }
+          return decision;
+        });
+        if (intent.intent !== 'artwork') return reply({editDecision:{...intent,panelId:panel.id,reviewedVersion:reviewed}});
+      }
+      await renderPanel(store,session,id,panel.id,instruction,reviewed);
       const latest = store.getOwned<Draft>(id,session)!;
       return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision)});
     }

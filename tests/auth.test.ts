@@ -16,6 +16,30 @@ function configure(){process.env.COMEX_APP_URL='http://localhost:3000';process.e
 const codeOf=(text:string)=>text.match(/code is (\d{8})/)![1];
 
 describe('email code authentication',()=>{
+ test('verified creator can claim legacy drafts, but cannot claim an internal account owner ID as a legacy cookie',async()=>{
+  const store=new LocalStore(':memory:');state.__comexLocalStore=store;configure();let text='';
+  globalThis.fetch=(async(_u,init)=>{text=JSON.parse(String(init?.body)).text;return new Response('{}',{status:200});}) as typeof fetch;
+  const legacy='a'.repeat(64), legacyCookie=`comex_session=${legacy}`;
+  store.create('legacy-draft',legacy,{...createBlankComic('legacy-draft',legacy),title:'Legacy',plot:'A story',styleId:'ink-manga',characters:[],questions:[],answers:{}});
+  expect((await run('comics/legacy-draft',undefined,legacyCookie)).status).toBe(200);
+  const issued=await run('auth/request',{email:'legacy@example.test'},legacyCookie);
+  const browser=cookie(issued,'comex_login');
+  const verified=await run('auth/verify',{email:'legacy@example.test',code:codeOf(text)},`${legacyCookie}; ${browser}`);
+  expect(verified.status).toBe(200);
+  expect((await run('comics/legacy-draft',undefined,cookie(verified,'comex_auth'))).status).toBe(200);
+  expect((await run('comics/legacy-draft',undefined,legacyCookie)).status).toBe(404);
+
+  const internal='b'.repeat(64), db=(store as unknown as {db:import('node:sqlite').DatabaseSync}).db;
+  db.prepare('INSERT INTO auth_users VALUES (?,?)').run('victim@example.test',internal);
+  store.create('victim-draft',internal,{...createBlankComic('victim-draft',internal),title:'Victim',plot:'A story',styleId:'ink-manga',characters:[],questions:[],answers:{}});
+  const forged=`comex_session=${internal}`;
+  expect((await run('comics/victim-draft',undefined,forged)).status).toBe(404);
+  const request=await run('auth/request',{email:'attacker@example.test'},forged);
+  const loggedIn=await run('auth/verify',{email:'attacker@example.test',code:codeOf(text)},`${forged}; ${cookie(request,'comex_login')}`);
+  expect(loggedIn.status).toBe(200);
+  expect((await run('comics/victim-draft',undefined,cookie(loggedIn,'comex_auth'))).status).toBe(404);
+  expect(store.getOwned('victim-draft',internal)).not.toBeNull();store.close();
+ });
  test('start a browser draft, verify email and claim it; codes cannot replay',async()=>{
   const store=new LocalStore(':memory:');state.__comexLocalStore=store;configure();let message:{to:string[];text:string}|undefined;
   globalThis.fetch=(async(_url,init)=>{message=JSON.parse(String(init?.body));return new Response('{}',{status:200});}) as typeof fetch;

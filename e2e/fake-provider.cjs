@@ -16,13 +16,23 @@ globalThis.fetch = async (input, init) => {
     return Response.json({id:'fake-email'});
   }
   if (!url.startsWith('https://api.openai.com/v1/')) return originalFetch(input, init);
-  if (url.includes('/images/')) return Response.json({data:[{b64_json:png}]});
+  if (url.includes('/images/')) {
+    const prompt = typeof init.body === 'string' ? JSON.parse(init.body).prompt : init.body.get('prompt');
+    if (String(prompt).includes('Retryref') && !require('node:fs').existsSync(require('node:path').join(process.env.COMEX_E2E_MAILBOX, 'allow-reference'))) {
+      return Response.json({error:{message:'Simulated reference failure'}},{status:400});
+    }
+    return Response.json({data:[{b64_json:png}]});
+  }
   const body = JSON.parse(init.body);
   const name = body.text.format.name;
   const raw = body.input[1].content;
   const payload = JSON.parse(typeof raw === 'string' ? raw : raw[0].text);
+  if (name === 'narrative_questions' && payload.plot.includes('AUTORETRYQUESTIONS') && !require('node:fs').existsSync(require('node:path').join(process.env.COMEX_E2E_MAILBOX, 'allow-questions'))) {
+    return Response.json({error:{message:'Simulated questions failure'}},{status:400});
+  }
   let output;
   if (name === 'narrative_questions') output = {questions:[{id:'goal',question:'What does Mina want?',suggested_answer:'Deliver the key'}]};
+  else if (name === 'character_suggestions') output = {characters:[{name:'Mina',role:'Courier',appearance:'Short red hair and freckles',outfit:'Yellow raincoat'}]};
   else if (name === 'storyboard') {
     const id = payload.characters[0].id;
     output = {bible:{premise:payload.plot,setting:'London',rules:['Mina carries the key'],character_ids:[id]},pages:Array.from({length:payload.pageCount},(_,i) => ({index:i+1,panels:Array.from({length:payload.panelsPerPage},(_,j) => ({id:`panel-${i+1}-${j+1}`,index:j+1,character_ids:[id],action:`Mina moves through scene ${i+1}-${j+1}`,framing:'wide',dialogue:[],state_before:state,state_after:state}))}))};
