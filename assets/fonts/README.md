@@ -8,3 +8,8 @@ system fonts in Vercel. Next.js outputFileTracingIncludes keeps the font in serv
 functions. Browser webfonts do not participate in rasterized comic lettering.
 
 The font covers Latin, Greek and Cyrillic; it is not an emoji or CJK font.
+
+Classic dialogue balloons use `Pangolin-Regular.ttf` (The Pangolin Project Authors / Google Fonts), bundled under SIL OFL in Pangolin-OFL.txt. Source:
+https://github.com/google/fonts/tree/main/ofl/pangolin
+It covers Latin and Cyrillic. Speaker labels and dialogue are rendered separately,
+with pixel-measured wrapping; balloon tails and panel frames stay outside artwork.

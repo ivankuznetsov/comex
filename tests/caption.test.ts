@@ -19,7 +19,8 @@ test('bundled font renders distinct Latin and Cyrillic glyphs with no system fon
     const normal=await run(false),isolated=await run(true);
     // Fontconfig hinting can change antialiasing and height by a pixel. Check
     // recognizable variable-width glyphs, not identical platform raster bytes.
-    expect(isolated[1].inkWidth).toBeGreaterThan(isolated[0].inkWidth*2);
+    // Balloon padding is fixed; wide glyphs must still make a wider balloon.
+    expect(isolated[1].inkWidth-isolated[0].inkWidth).toBeGreaterThan(40);
     for(let i=0;i<normal.length;i++) {
       expect(Math.abs(normal[i].inkWidth-isolated[i].inkWidth)).toBeLessThan(5);
       expect(Math.abs(normal[i].height-isolated[i].height)).toBeLessThan(3);
@@ -35,4 +36,16 @@ test('pixel wrapping handles long text and escapes literal markup',async()=>{
   const meta=await sharp(long!.image).metadata();expect(meta.width).toBe(480);expect(meta.height).toBe(long!.height);
   expect(await renderCaption([],980)).toBeNull();
   expect(renderCaption(['bad\u0000text'],980)).rejects.toThrow('cannot be rendered');
+});
+
+test('speaker names and long multilingual dialogue wrap in separate balloons',async()=>{
+  const line={speaker:'Нора & <Pip> '.repeat(8),text:'Подожди! The last star is ours. '.repeat(12)};
+  for(const width of [480,980]) {
+    const one=await renderCaption([line],width);
+    const two=await renderCaption([line,{speaker:'Pip',text:'I will stay.'}],width);
+    expect(two!.height).toBeGreaterThan(one!.height);
+    expect((await sharp(two!.image).metadata()).width).toBe(width);
+    expect(two!.height).toBeLessThan(12000);
+  }
+  expect(renderCaption([{speaker:'bad\u0000name',text:'Hello'}],480)).rejects.toThrow('cannot be rendered');
 });
