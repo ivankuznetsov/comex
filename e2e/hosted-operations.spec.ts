@@ -41,7 +41,7 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
       if(action==='approveCharacter'){draft.characters[0].approved=true;draft.revision++;}
       if(action==='planStory'){draft.storyboard={bible:{premise:'A key',setting:'Town',rules:[],character_ids:[characterId]},pages:[{index:1,panels:[{id:'panel-1',index:1,character_ids:[characterId],action:'Mina finds the key',framing:'wide',dialogue:[{speaker_id:characterId,text:'Here it is'}],state_before:storyState,state_after:storyState}]}]};draft.pages=[{id:'page-1',index:1,status:'planned',panels:[{id:'panel-1',description:'Mina finds the key',status:'planned',evaluation:'pending'}]}];draft.storyReview={outcome:'pass',findings:[],fingerprint:'a'.repeat(64),accepted:false};draft.storyApproval={storyRevision:1,fingerprint:'b'.repeat(64),approved:false};draft.revision++;}
       if(action==='approveStory'){draft.storyApproval.approved=true;draft.revision++;}
-      if(action==='generatePage'){draft.pages[0].status='needs_review';draft.pages[0].panels[0]={id:'panel-1',description:'Mina finds the key',imageUrl:'/api/comics/mock-comic/assets/'+panelImage,status:'needs_review',evaluation:'blocker',reviewOutcome:'findings',findings:[{severity:'blocker',dimension:'story',expected:'key',observed:'missing key'}],accepted:false,reviewVersion:{assetId:panelImage,storyRevision:1,panelRevision:2}};draft.revision++;}
+      if(action==='generatePage'){draft.pages[0].status='needs_review';draft.pages[0].panels[0]={id:'panel-1',description:'Mina finds the key',imageUrl:'/api/comics/mock-comic/assets/'+panelImage,status:'needs_review',evaluation:'blocker',reviewOutcome:'findings',findings:[{severity:'blocker',dimension:'story',expected:'key',observed:'missing key'}],ready:true,accepted:false,reviewVersion:{assetId:panelImage,storyRevision:1,panelRevision:2}};draft.revision++;}
       if(action==='acceptPanel'){draft.pages[0].panels[0].accepted=true;draft.pages[0].status='current';draft.revision++;}
       if(action==='publish'){draft.published=true;draft.publication={editionId:'edition-1',title:input.title,creator:input.creator};draft.revision++;}
       job.result=result;
@@ -77,8 +77,8 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     await page.getByRole('button',{name:'Approve story',exact:true}).click();await expect(page.getByText('Story approved for drawing.')).toBeVisible();
     await page.getByRole('button',{name:'Generate page',exact:true}).click();await expect(page.getByText('Check: blocker')).toBeVisible();
     expect(requests.find(item=>item.action==='generatePage')?.input.intent).toBe('generate');
-    page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Accept this panel'}).click();await expect(page.getByText('Check: blocker · Accepted')).toBeVisible();
-    const accepted=requests.find(item=>item.action==='acceptPanel');expect(accepted?.input).toMatchObject({panelId:'panel-1',assetId:panelImage,storyRevision:1,panelRevision:2});
+    await expect(page.getByText('These findings are advisory; no approval is needed.')).toBeVisible();
+    expect(requests.filter(item=>item.action==='acceptPanel')).toHaveLength(0);
     await page.getByRole('button',{name:'Prepare download'}).click();const download=page.getByRole('link',{name:'Download page'});await expect(download).toHaveAttribute('href',/\/api\/operations\/op-\d+\/export/);
     await page.getByRole('button',{name:'Publish',exact:true}).click();await page.getByRole('button',{name:'Publish comic'}).click();await expect(page.getByText('Published! Your comic is now on the community shelf.')).toBeVisible();
     expect(requests.find(item=>item.action==='publish')?.input.expectedEditionId).toBeNull();
