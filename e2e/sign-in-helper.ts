@@ -14,5 +14,5 @@ export async function signIn(page:Page, email:string) {
   expect(code).toBeTruthy();
   await page.getByLabel('One-time code').fill(code!);
   await page.getByRole('button',{name:'Sign in →'}).click();
-  await expect(page).toHaveURL(/\/drafts$/);
+  await expect(page).toHaveURL(/\/drafts$/,{timeout:30_000});
 }

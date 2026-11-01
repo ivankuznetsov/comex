@@ -27,6 +27,7 @@ test('page job survives browser reload and is shared across tabs',async ({browse
     await page.getByRole('button',{name:'Approve',exact:true}).click();
     await page.getByRole('button',{name:/Plan story/}).click();
     await expect(page.getByText('Story review: pass')).toBeVisible();
+    await page.getByRole('button',{name:'Approve story',exact:true}).click();
     const before=(await readFile(count,'utf8')).trim().split('\n').length;
     await writeFile(hold,'1');
     await page.getByRole('button',{name:'Generate page',exact:true}).click();
