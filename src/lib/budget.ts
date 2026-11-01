@@ -10,14 +10,14 @@ export class BudgetError extends Error {
     this.name = 'BudgetError';
   }
 }
-export type BudgetConfig = { maxCalls: number | undefined; maxConcurrent: number | undefined };
+export type BudgetConfig = { maxCalls: number | 'unlimited' | undefined; maxConcurrent: number | undefined };
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-/** A configured maximum is deliberately required before any billable request. */
+/** An explicit total-call policy is required before any billable request. */
 export function budgetFromEnvironment(): BudgetConfig {
   const readInteger = (s: string | undefined): number | undefined => s && /^\d+$/.test(s) ? Number(s) : undefined;
   return {
-    maxCalls: readInteger(process.env.COMEX_MAX_PROVIDER_CALLS),
+    maxCalls: process.env.COMEX_MAX_PROVIDER_CALLS === 'unlimited' ? 'unlimited' : readInteger(process.env.COMEX_MAX_PROVIDER_CALLS),
     maxConcurrent: process.env.COMEX_MAX_CONCURRENT_CALLS === undefined ? 1 : readInteger(process.env.COMEX_MAX_CONCURRENT_CALLS),
   };
 }
@@ -38,14 +38,14 @@ export class ProviderBudget {
   }
   reserve(): string {
     const {maxCalls, maxConcurrent} = this.config;
-    if (!Number.isSafeInteger(maxCalls) || (maxCalls as number) < 1 ||
+    if ((maxCalls !== 'unlimited' && (!Number.isSafeInteger(maxCalls) || (maxCalls as number) < 1)) ||
         !Number.isSafeInteger(maxConcurrent) || (maxConcurrent as number) < 1) {
-      throw new BudgetError('budget_not_configured', 'Set positive integer COMEX_MAX_PROVIDER_CALLS and COMEX_MAX_CONCURRENT_CALLS before using AI.');
+      throw new BudgetError('budget_not_configured', 'Set COMEX_MAX_PROVIDER_CALLS to a positive integer or unlimited, and COMEX_MAX_CONCURRENT_CALLS to a positive integer before using AI.');
     }
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const counts = this.summary();
-      if (counts.used >= maxCalls!) throw new BudgetError('budget_exhausted', 'The configured AI call budget is exhausted.');
+      if (typeof maxCalls === 'number' && counts.used >= maxCalls) throw new BudgetError('budget_exhausted', 'The configured AI call budget is exhausted.');
       if (counts.active >= maxConcurrent!) throw new BudgetError('concurrency_limit', 'The AI concurrency limit is reached or a previous request has an unknown outcome.');
       const id = randomUUID();
       const now = new Date().toISOString();

@@ -22,6 +22,7 @@ const short = z.string().trim().min(1).max(300);
 const createSchema = z.object({title: short, plot: z.string().trim().min(1).max(4000), style: styles}).strict();
 const patchSchema = z.object({title: short.optional(), plot: z.string().trim().min(1).max(4000).optional(), style: styles.optional(), answers: z.record(z.string().max(100), z.string().max(1000)).optional()}).strict();
 const characterSchema = z.object({name: short, role: short, appearance: z.string().trim().min(1).max(1000), outfit: z.string().trim().min(1).max(1000)}).strict();
+const panelVersionSchema = z.object({assetId:z.string().uuid(),storyRevision:z.number().int().positive(),panelRevision:z.number().int().positive()}).strict();
 const publishSchema = z.object({title: short, creator: z.string().trim().max(100)}).strict();
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 function reply(data: unknown, status = 200) { return NextResponse.json(data, {status, headers: {'Cache-Control': 'no-store'}}); }
@@ -65,10 +66,10 @@ function view(draft: Draft, published: Edition | null, revision: number) {
   const reviewFingerprint = narrativeFingerprint(draft);
   return {
     id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId,
-    characters: draft.characters.map(({referenceAssetId: _, ...character}) => character), questions: draft.questions, answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
+    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null})), questions: draft.questions, answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
       status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => p.storyRevision === draft.storyRevision && isPanelReady(p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
-      panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, findings: draft.panelFindings?.[p.id] ?? [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null}))})),
+      panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, findings: draft.panelFindings?.[p.id] ?? [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null}))})),
     published: !!published, publication: published ? {title:published.title, creator:published.creator} : null,
     unpublishedChanges: !!published && published.sourceRevision !== revision,
   };
@@ -96,6 +97,25 @@ function inconclusiveReview(error: unknown) {
   if (error instanceof AIError && (error.code === 'unknown_outcome' || error.code === 'invalid_response')) throw error;
   return {outcome:'inconclusive',findings:[]};
 }
+type StoryPanel = Storyboard['pages'][number]['panels'][number];
+type StoryState = StoryPanel['state_before'];
+
+/** Remove only byte-for-byte repeated facts; conflicting values still fail validation. */
+function normalizeState(state: StoryState): StoryState {
+  const unique = (facts: StoryState['props']) => {
+    const seen = new Map<string, Set<string>>();
+    return facts.filter(({key,value}) => {
+      const values = seen.get(key) ?? new Set<string>();
+      if (values.has(value)) return false;
+      values.add(value); seen.set(key,values); return true;
+    });
+  };
+  return {...state, props:unique(state.props), outfits:unique(state.outfits), injuries:unique(state.injuries), knowledge:unique(state.knowledge)};
+}
+function normalizePanelLedger(panel: StoryPanel): StoryPanel {
+  return {...panel,state_before:normalizeState(panel.state_before),state_after:normalizeState(panel.state_after)};
+}
+
 /** Deterministic checks cannot infer a transfer from prose; they enforce the explicit state ledger. */
 export function validateStoryLedger(storyboard: Storyboard): string[] {
   const errors: string[] = [];
@@ -152,7 +172,7 @@ function hasNarrativeBlocker(draft: Draft): boolean {
 function requireClearNarrative(draft: Draft): void {
   if (hasNarrativeBlocker(draft)) throw new HttpError(409, 'Resolve the story review blockers before generating artwork.');
 }
-async function renderPanel(store: LocalStore, session: string, comicId: string, panelId: string, editInstruction?: string, expectedAssetId?: string): Promise<void> {
+async function renderPanel(store: LocalStore, session: string, comicId: string, panelId: string, editInstruction?: string, expectedVersion?: z.infer<typeof panelVersionSchema>): Promise<void> {
   const record = store.getOwned<Draft>(comicId, session);
   if (!record || !record.data.storyboard) throw new HttpError(409, 'Plan the story first.');
   const draft = record.data;
@@ -163,12 +183,14 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
   if (index < 0) throw new HttpError(404, 'Panel not found.');
   const panel = panels[index];
   if (panel.status === 'checking') throw new HttpError(409, 'Wait for the panel review to finish.');
-  if (expectedAssetId && panel.assetId !== expectedAssetId) throw new HttpError(409, 'Panel changed while planning the edit; try again.');
+  if (expectedVersion && (panel.assetId !== expectedVersion.assetId || panel.revision !== expectedVersion.panelRevision || panel.storyRevision !== expectedVersion.storyRevision || draft.storyRevision !== expectedVersion.storyRevision)) throw new HttpError(409, 'Panel changed while planning the edit; refresh and review it again.');
   const previous = index > 0 ? panels[index - 1] : undefined;
   if (previous && (!previous.assetId || previous.storyRevision !== draft.storyRevision || ['outdated','planned','checking'].includes(previous.status))) throw new HttpError(409, 'Generate and review earlier panels first.');
   if (previous?.evaluation === 'blocker' && !isPanelReady(previous)) throw new HttpError(409, 'Review the preceding panel before generating this one.');
   const spec = storyboard.pages.flatMap(p => p.panels).find(p => p.id === panelId);
   if (!spec) throw new HttpError(409, 'The storyboard does not match this panel.');
+  // Dialogue is added later during page composition; raw art must remain unlettered.
+  const {dialogue: _dialogue, ...visualSpec} = spec; void _dialogue;
   const characters = draft.characters.filter(c => spec.character_ids.includes(c.id));
   if (characters.length !== spec.character_ids.length || characters.some(c => !c.approved || !c.referenceAssetId)) throw new HttpError(409, 'Approve all character references first.');
   const anchorCharacters = characters.length ? characters : draft.characters.filter(c => c.approved && c.referenceAssetId).slice(0,1);
@@ -181,8 +203,8 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
   let assetId: string;
   try {
     const bytes = editInstruction
-      ? await ai().editPanel({change:editInstruction,preserve:JSON.stringify({style:styleRules(draft.styleId),panel:spec,characters}),references:[{role:'target panel',id:panelId,bytes:await asset(panel.assetId!),mimeType:'image/png'},...references]})
-      : await ai().panel({styleRules:styleRules(draft.styleId),panelSpec:JSON.stringify(spec),sceneBefore:JSON.stringify(spec.state_before),characters,references});
+      ? await ai().editPanel({change:editInstruction,preserve:JSON.stringify({style:styleRules(draft.styleId),panel:visualSpec,characters}),references:[{role:'target panel',id:panelId,bytes:await asset(panel.assetId!),mimeType:'image/png'},...references]})
+      : await ai().panel({styleRules:styleRules(draft.styleId),panelSpec:JSON.stringify(visualSpec),sceneBefore:JSON.stringify(spec.state_before),characters,references});
     assetId = await saveAsset(bytes);
     const latest = store.getOwned<Draft>(comicId,session);
     if (!latest || latest.revision !== record.revision + 1) throw new HttpError(409,'Draft changed while rendering; the result was not applied.');
@@ -202,7 +224,7 @@ async function renderPanel(store: LocalStore, session: string, comicId: string, 
   // An unsuccessful or uncalibrated review remains uncertain and requires creator acceptance.
   let findings: Awaited<ReturnType<ReturnType<typeof ai>['visualJudge']>>['findings'] = [];
   try {
-    const result = await ai().visualJudge({bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:spec,
+    const result = await ai().visualJudge({bible:storyboard.bible,styleRules:styleRules(draft.styleId),beats:visualSpec,
       references:[...references,{role:'generated panel',id:panelId,bytes:await asset(assetId),mimeType:'image/png'}]});
     findings = result.findings;
   } catch { /* Keep the image and surface an uncertain result. */ }
@@ -412,8 +434,10 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       await input(request, z.object({}).strict());
       if (data.pages.length) throw new HttpError(409, 'Use story revision to change existing pages.');
       if (!data.characters.length || data.characters.some(c => !c.approved || !c.referenceAssetId)) throw new HttpError(409, 'Approve reference images for every selected character first.');
+      if (data.characters.some(c => data.operations?.[`character:${c.id}`])) throw new HttpError(409, 'Resolve character reference requests before planning the story.');
       return await withTextOperation(store,session,id,revision,async () => {
-      const storyboard = await ai().storyboard({plot:data.plot, answers:answeredQuestions(data), styleRules:styleRules(data.styleId), characters:data.characters, pageCount:3, panelsPerPage:3});
+      const generated = await ai().storyboard({plot:data.plot, answers:answeredQuestions(data), styleRules:styleRules(data.styleId), characters:data.characters, pageCount:3, panelsPerPage:3});
+      const storyboard = {...generated,pages:generated.pages.map(page => ({...page,panels:page.panels.map(normalizePanelLedger)}))};
       const ledgerErrors = validateStoryLedger(storyboard);
       if (ledgerErrors.length) throw new HttpError(422, `Story state needs correction: ${ledgerErrors[0]}`);
       const planned = createComic({id, ownerId:session, title:data.title, creatorName:data.creatorName, plot:data.plot, styleId:data.styleId,
@@ -470,10 +494,12 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       return reply({comic: save(store, session, revision, {...data, characters: data.characters.map(c => c.id === character.id ? replacement : c)})});
     }
     if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'approve' && method === 'POST') {
-      await input(request, z.object({}).strict());
+      const {assetId} = await input(request, z.object({assetId:z.string().uuid()}).strict());
       const character = data.characters.find(c => c.id === segments[3]);
       if (!character) throw new HttpError(404, 'Character not found.');
-      if (!character.referenceUrl) throw new HttpError(409, 'Create a reference image before approval.');
+      if (data.operations?.[`character:${character.id}`]) throw new HttpError(409, 'Resolve the character reference request before approval.');
+      if (!character.referenceUrl || !character.referenceAssetId) throw new HttpError(409, 'Create a reference image before approval.');
+      if (character.referenceAssetId !== assetId) throw new HttpError(409, 'This reference changed since you reviewed it. Refresh and review the current image.');
       return reply({comic: save(store, session, revision, {...data, characters: data.characters.map(c => c.id === character.id ? {...c, approved: true} : c)})});
     }
     if (segments[2] === 'revisions' && segments[3] === 'preview' && segments.length === 4 && method === 'POST') {
@@ -481,7 +507,8 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       if (!data.storyboard) throw new HttpError(409,'Plan the story before revising it.');
       const currentStoryboard = data.storyboard;
       return await withTextOperation(store,session,id,revision,async () => {
-      const result = await ai().revision({storyboard:currentStoryboard,firstPanelId:body.panelId,instruction:body.instruction,characters:data.characters});
+      const generated = await ai().revision({storyboard:currentStoryboard,firstPanelId:body.panelId,instruction:body.instruction,characters:data.characters});
+      const result = {...generated,revised_suffix:generated.revised_suffix.map(normalizePanelLedger)};
       const changed = new Map(result.revised_suffix.map(panel => [panel.id,panel]));
       const proposed: Storyboard = {...currentStoryboard,bible:result.revised_bible,pages:currentStoryboard.pages.map(page => ({...page,panels:page.panels.map(panel => changed.get(panel.id) ?? panel)}))};
       const errors = validateStoryLedger(proposed);
@@ -580,22 +607,24 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision+1)});
     }
     if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'edit' && method === 'POST') {
-      const body = await input(request,z.object({instruction:z.string().trim().min(1).max(2000)}).strict());
+      const body = await input(request,panelVersionSchema.extend({instruction:z.string().trim().min(1).max(2000)}).strict());
       requireClearNarrative(data);
       const panel = data.pages.flatMap(page => page.panels).find(panel => panel.id === segments[3]);
       if (!panel || !panel.assetId || panel.storyRevision !== data.storyRevision || (panel.status === 'outdated' || panel.status === 'checking')) throw new HttpError(409,'Generate the current panel before editing its artwork.');
+      if (panel.assetId !== body.assetId || panel.revision !== body.panelRevision || panel.storyRevision !== body.storyRevision) throw new HttpError(409,'This panel changed since you viewed it. Refresh and review the current image.');
       const intent = await ai().classifyEdit({instruction:body.instruction,panelContext:panel.beat});
       if (intent.intent !== 'artwork') throw new HttpError(409,`This change may affect the story. Use Change the story instead. ${intent.reason}`);
-      await renderPanel(store,session,id,panel.id,body.instruction,panel.assetId);
+      await renderPanel(store,session,id,panel.id,body.instruction,body);
       const latest = store.getOwned<Draft>(id,session)!;
       return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision)});
     }
     if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'accept' && method === 'POST') {
-      await input(request,z.object({}).strict());
+      const reviewed = await input(request,panelVersionSchema);
       const panel = data.pages.flatMap(p => p.panels).find(p => p.id === segments[3]);
       if (!panel || !panel.assetId) throw new HttpError(404,'Panel image not found.');
+      if (panel.assetId !== reviewed.assetId || panel.revision !== reviewed.panelRevision || panel.storyRevision !== reviewed.storyRevision || data.storyRevision !== reviewed.storyRevision) throw new HttpError(409,'This panel changed since you reviewed it. Refresh and review the current image.');
       let updated: Draft;
-      try { updated = acceptPanel(data,session,panel.id,panel.assetId,data.storyRevision) as Draft; }
+      try { updated = acceptPanel(data,session,panel.id,reviewed.assetId,reviewed.storyRevision) as Draft; }
       catch { throw new HttpError(409,'This panel cannot be accepted in its current state.'); }
       return reply({comic:save(store,session,revision,updated)});
     }

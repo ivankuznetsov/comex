@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BudgetError, createBudgetedFetch, finalizeBudgetedResponse, ProviderBudget } from '../src/lib/budget';
+import { BudgetError, budgetFromEnvironment, createBudgetedFetch, finalizeBudgetedResponse, ProviderBudget } from '../src/lib/budget';
 
 function db() { const dir = mkdtempSync(join(tmpdir(), 'comex-budget-')); return {dir, path: join(dir, 'budget.sqlite')}; }
 const ok = async () => new Response('{}', { status: 200 });
@@ -25,6 +25,56 @@ describe('provider-call budget', () => {
     expect((await second('https://example.test')).status).toBe(400);
     await expect(first('https://example.test')).rejects.toMatchObject({code:'budget_exhausted'});
     expect(calls).toBe(2); rmSync(dir,{recursive:true,force:true});
+  });
+  test('explicit unlimited mode keeps counting calls and still enforces concurrency', async () => {
+    const {dir,path} = db(); const previousCalls=process.env.COMEX_MAX_PROVIDER_CALLS, previousConcurrent=process.env.COMEX_MAX_CONCURRENT_CALLS;
+    try {
+      const finite = new ProviderBudget(path, {maxCalls:1,maxConcurrent:1});
+      const earlier=finite.reserve(); finite.finish(earlier,'completed'); finite.close();
+      process.env.COMEX_MAX_PROVIDER_CALLS='unlimited'; process.env.COMEX_MAX_CONCURRENT_CALLS='1';
+      expect(budgetFromEnvironment()).toEqual({maxCalls:'unlimited',maxConcurrent:1});
+      let calls=0;
+      const request=createBudgetedFetch(path, async () => {calls++; return ok();});
+      const first=await request('https://example.test');
+      await expect(request('https://example.test')).rejects.toMatchObject({code:'concurrency_limit'});
+      await first.json(); finalizeBudgetedResponse(first,'completed');
+      const second=await request('https://example.test'); await second.json(); finalizeBudgetedResponse(second,'completed');
+      const budget=new ProviderBudget(path); expect(budget.summary()).toEqual({used:3,active:0,unknown:0}); budget.close();
+      expect(calls).toBe(2);
+    } finally {
+      if (previousCalls === undefined) delete process.env.COMEX_MAX_PROVIDER_CALLS; else process.env.COMEX_MAX_PROVIDER_CALLS=previousCalls;
+      if (previousConcurrent === undefined) delete process.env.COMEX_MAX_CONCURRENT_CALLS; else process.env.COMEX_MAX_CONCURRENT_CALLS=previousConcurrent;
+      rmSync(dir,{recursive:true,force:true});
+    }
+  });
+  test('unlimited must be explicit and does not release uncertain reservations', async () => {
+    const {dir,path}=db(); const previousCalls=process.env.COMEX_MAX_PROVIDER_CALLS, previousConcurrent=process.env.COMEX_MAX_CONCURRENT_CALLS;
+    try {
+      process.env.COMEX_MAX_CONCURRENT_CALLS='1';
+      for (const invalid of ['', 'Unlimited', '0', 'infinite', '-1']) {
+        process.env.COMEX_MAX_PROVIDER_CALLS=invalid;
+        const b=new ProviderBudget(path); expect(() => b.reserve()).toThrow(BudgetError); b.close();
+      }
+      process.env.COMEX_MAX_PROVIDER_CALLS='unlimited'; let calls=0;
+      const request=createBudgetedFetch(path, async () => {calls++; throw new Error('lost response');});
+      await expect(request('https://example.test')).rejects.toThrow('lost response');
+      await expect(request('https://example.test')).rejects.toMatchObject({code:'concurrency_limit'});
+      const budget=new ProviderBudget(path); expect(budget.summary()).toEqual({used:1,active:1,unknown:1}); budget.close();
+      expect(calls).toBe(1);
+    } finally {
+      if (previousCalls === undefined) delete process.env.COMEX_MAX_PROVIDER_CALLS; else process.env.COMEX_MAX_PROVIDER_CALLS=previousCalls;
+      if (previousConcurrent === undefined) delete process.env.COMEX_MAX_CONCURRENT_CALLS; else process.env.COMEX_MAX_CONCURRENT_CALLS=previousConcurrent;
+      rmSync(dir,{recursive:true,force:true});
+    }
+  });
+  test('unlimited mode can use the configured fifty concurrent slots', () => {
+    const {dir,path}=db();
+    const budget=new ProviderBudget(path,{maxCalls:'unlimited',maxConcurrent:50});
+    try {
+      for (let i=0; i<50; i++) budget.reserve();
+      expect(budget.summary()).toEqual({used:50,active:50,unknown:0});
+      expect(() => budget.reserve()).toThrow('The AI concurrency limit is reached');
+    } finally { budget.close(); rmSync(dir,{recursive:true,force:true}); }
   });
   test('two independent instances cannot exceed the concurrent limit', async () => {
     const {dir,path} = db(); let release!: () => void; let calls=0;
