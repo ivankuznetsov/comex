@@ -2,6 +2,7 @@ import type { NextConfig } from 'next';
 import {withWorkflow} from 'workflow/next';
 
 export const nextConfig: NextConfig = {
+  outputFileTracingIncludes: {'/*': ['./assets/fonts/*.ttf', './assets/fonts/LICENSE.txt']},
   async rewrites() {
     const backend = process.env.COMEX_DEMO_BACKEND_URL;
     if (!backend) return {beforeFiles: [], afterFiles: [], fallback: []};

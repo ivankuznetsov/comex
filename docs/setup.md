@@ -87,3 +87,14 @@ This preserves the image and records a failed review for that exact image and ve
 In the local runtime, character cards can use a generated reference or upload one static PNG, JPEG, or WebP up to 4 MiB and 16,777,216 pixels. Select “Upload a reference for new character” when adding a card to avoid generating an image first. Comex normalizes the upload to PNG and shows the saved preview. Review the appearance and outfit fields and approve that exact image before planning. Replacing a reference clears its approval. Reference uploads are available before planning pages. Characters already used in a planned story remain locked; newly added characters can still generate references. The hosted runtime does not yet support uploads.
 
 The standalone Responses/Decisions comparison is offline by default: run `bun run eval:decisions`. Its synthetic fixtures are unreviewed candidates, not evidence of model accuracy. A live trial requires separately authorized paid calls, reviewed labels, a finite call budget and a dedicated budget database; see [evaluation setup](../evals/README.md). It never changes drafts or enables automatic repairs.
+
+## Repairing published lettering
+
+Server-side lettering uses the bundled Liberation Sans font and explicit Sharp
+font loading. Deployments must include `assets/fonts/` (Next file tracing is
+configured). To repair an unchanged published edition without AI calls, run
+`scripts/repair-lettering.ts` with the comic ID, expected edition ID, and an
+absolute private output directory. Review its saved page images, then rerun with
+`--apply EXPECTED_REVISION`. It refuses changed editions, unpublished edits and
+revision conflicts, saves the prior metadata, and preserves panel assets. Never
+commit production environment files or backup metadata.

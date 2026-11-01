@@ -1,9 +1,8 @@
 import { z } from 'zod';
-import sharp from 'sharp';
 import { AIError, type Storyboard, type Reference } from '../ai/service';
 import {BudgetError} from '../budget';
 import stylePresets from '../../../prompts/styles.json';
-import { displayDialogueLines } from '../lettering';
+import {composePages} from '../composition';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel as acceptPanelInDomain, reviseStory, publishComic, isPanelReady } from '../domain/comic';
 import { ApplicationError, parse, pageIntentMatches, short, createSchema, patchSchema, characterSchema, referenceUploadSchema, panelVersionSchema, publishSchema, type Actor, type Character, type ComicDependencies, type ComicRepository, type Draft, type Edition, type PanelReview, type Json } from './contracts';
 import { characterCardVersion, characterUsedInStory, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view as projectView } from './views';
@@ -82,8 +81,6 @@ function revisionCompletionNotice(firstPage:number, pageCount:number, previousRe
     if (!previousReady) return 'Story change saved. Draw earlier pages before continuing.';
     return firstPage < pageCount - 1 ? 'Later pages remain outdated until you generate them.' : 'Story updated. Review the updated artwork and checks.';
 }
-function xml(value: string): string { if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]/u.test(value))
-    throw new ApplicationError('invalid_input', 'Dialogue includes a character that cannot be rendered.'); return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;'); }
 export const durableComicServiceVersion='comex-durable-service-v1' as const;
 /** Domain orchestration with no request, cookie, or HTTP response dependency. */
 export function createComicService(deps: ComicDependencies) {
@@ -710,67 +707,6 @@ export function createComicService(deps: ComicDependencies) {
         if (!(await store.update(comicId, session, latest.revision, { ...latest.data, pages, panelFindings, panelReviews })))
             throw new ApplicationError('conflict', 'Draft changed while saving the review; refresh and try again.');
     }
-    async function composePages(draft: Draft): Promise<{
-        id: string;
-        image: Buffer;
-    }[]> {
-        if (!draft.storyboard)
-            throw new ApplicationError('conflict', 'The storyboard is missing.');
-        const grid = draft.pageLayout === 'grid';
-        const panelWidth = grid ? 480 : 980;
-        const panelHeight = grid ? 260 : 420;
-        const orderedSpecs = new Map(draft.storyboard.pages.flatMap(p => p.panels).map(p => [p.id, p]));
-        const result: {
-            id: string;
-            image: Buffer;
-        }[] = [];
-        for (const page of draft.pages) {
-            const sections: {
-                image: Buffer;
-                lines: string[];
-            }[] = [];
-            for (const panel of page.panels) {
-                const spec = orderedSpecs.get(panel.id);
-                if (!panel.assetId || !spec)
-                    throw new ApplicationError('conflict', 'A page is missing its current panel.');
-                const image = await sharp(await asset(panel.assetId)).resize(panelWidth, panelHeight, { fit: 'contain', background: '#fffef8' }).png().toBuffer();
-                const lines: string[] = [];
-                for (const dialogue of spec.dialogue) {
-                    const name = draft.characters.find(c => c.id === dialogue.speaker_id)?.name ?? dialogue.speaker_id;
-                    lines.push(...displayDialogueLines(`${name}: ${dialogue.text}`, grid ? 20 : 42));
-                }
-                sections.push({ image, lines });
-            }
-            const rows = grid ? Array.from({ length: Math.ceil(sections.length / 2) }, (_, i) => sections.slice(i * 2, i * 2 + 2)) : sections.map(section => [section]);
-            const height = 20 + rows.reduce((sum, row) => sum + Math.max(...row.map(s => panelHeight + (s.lines.length ? s.lines.length * 30 + 24 : 0))) + 20, 0);
-            if (height > 12000)
-                throw new ApplicationError('invalid_input', 'The page has too much dialogue to compose.');
-            const composites: {
-                input: Buffer;
-                top: number;
-                left: number;
-            }[] = [];
-            let y = 20;
-            for (const row of rows) {
-                let rowHeight = panelHeight;
-                row.forEach((section, column) => {
-                    const x = grid && row.length === 1 ? (1020 - panelWidth) / 2 : 20 + column * (panelWidth + 20);
-                    composites.push({ input: section.image, top: y, left: x });
-                    if (section.lines.length) {
-                        const h = section.lines.length * 30 + 24;
-                        const lines = section.lines.map((line, i) => `<text x="12" y="${26 + i * 30}" font-family="sans-serif" font-size="22" fill="#171717" xml:space="preserve">${xml(line)}</text>`).join('');
-                        const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${panelWidth}" height="${h}"><rect width="${panelWidth}" height="${h}" fill="white" stroke="#171717" stroke-width="3"/>${lines}</svg>`);
-                        composites.push({ input: svg, top: y + panelHeight, left: x });
-                        rowHeight = Math.max(rowHeight, panelHeight + h);
-                    }
-                });
-                y += rowHeight + 20;
-            }
-            const image = await sharp({ create: { width: 1020, height, channels: 4, background: '#fff8e8' } }).composite(composites).png().toBuffer();
-            result.push({ id: page.id, image });
-        }
-        return result;
-    }
     function listStyles() {
         return {styles:comicStyles.map(({id,name,description}) => ({id,name,description}))};
     }
@@ -1189,7 +1125,7 @@ export function createComicService(deps: ComicDependencies) {
             throw new ApplicationError('not_found', 'Page not found.');
         if (!page.panels.length || page.panels.some(p => !artworkReady(data,p)))
             throw new ApplicationError('conflict', 'Generate every current panel on this page before downloading.');
-        const [composed] = await composePages({ ...data, pages: [page] });
+        const [composed] = await composePages({ ...data, pages: [page] }, asset);
         if ((await store.getOwned<Draft>(id, session))?.revision !== revision)
             throw new ApplicationError('conflict', 'Draft changed while composing; try again.');
         return composed.image;
@@ -1302,7 +1238,7 @@ export function createComicService(deps: ComicDependencies) {
         const updated = { ...data, title: body.title, creatorName: body.creator };
         if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !artworkReady(updated,p))))
             throw new ApplicationError('conflict', 'All current panels must be generated before publishing.');
-        const pageImages = await composePages(updated);
+        const pageImages = await composePages(updated, asset);
         const pages = pageImages.map(page => ({ id: page.id, assetId: deps.id(), image: page.image }));
         const composed = { ...updated, pages: updated.pages.map((page, i) => ({ ...page, composition: { assetId: pages[i].assetId, panelAssetIds: page.panels.map(panel => panel.assetId!) } })) };
         const editionId = deps.id();
