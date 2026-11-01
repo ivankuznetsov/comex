@@ -21,14 +21,12 @@ async function fixture(){
   const view=(await service.get(owner,id)).comic;await service.approveStory(owner,id,{revision:view.revision,storyRevision:view.storyRevision,fingerprint:view.storyApproval!.fingerprint});
   return {store,service,id,image,png,files};
 }
-test('review findings remain visible and gate the next page until accepted',async()=>{
+test('review findings remain visible without gating the next page',async()=>{
   const f=await fixture();try{
     const view=(await f.service.get(owner,f.id)).comic,panel=view.pages[0].panels[0];
-    expect(panel.ready).toBe(true);expect(panel.reviewed).toBe(false);expect(view.nextActions).toContain('accept_panel');expect(view.nextSteps.some(step=>step.action==='generate_page'&&step.pageId==='page2')).toBe(false);
-    await expect(f.service.generatePage(owner,f.id,'page2')).rejects.toMatchObject({code:'conflict'});
-    const accepted=(await f.service.acceptPanel(owner,f.id,'p1',panel.reviewVersion!)).comic;
-    expect(accepted.pages[0].panels[0].reviewed).toBe(true);expect(accepted.nextSteps.some(step=>step.action==='generate_page'&&step.pageId==='page2')).toBe(true);
+    expect(panel.ready).toBe(true);expect(panel.reviewed).toBe(true);expect(panel.accepted).toBe(false);expect(view.nextActions).toContain('accept_panel');expect(view.nextSteps.some(step=>step.action==='generate_page'&&step.pageId==='page2')).toBe(true);
     const next=(await f.service.generatePage(owner,f.id,'page2')).comic.pages[1].panels[0];expect(next.reviewOutcome).toBe('pass');expect(next.reviewed).toBe(true);expect(next.accepted).toBe(false);
+    const accepted=(await f.service.acceptPanel(owner,f.id,'p1',panel.reviewVersion!)).comic;expect(accepted.pages[0].panels[0].accepted).toBe(true);
   }finally{f.store.close();}
 });
 test('characters unused by the story remain editable and story approval stays valid',async()=>{
@@ -48,11 +46,10 @@ test('revision preview preserves the instruction and labels affected panels',asy
     expect(preview.instruction).toBe('Keep the key');expect(preview.explanation).toBe('Update page 2, panel 1');expect(preview.panels[0]).toMatchObject({id:'p2',page:2,panel:1,previousAction:'Action p2',action:'Keep the key'});
   }finally{f.store.close();}
 });
-test('publication requires reviewed panels and snapshots a separate cover asset',async()=>{
+test('publication permits unaccepted advisory findings and snapshots a separate cover asset',async()=>{
   const f=await fixture();try{
-    const row=f.store.getOwned<Draft>(f.id,owner)!,image2=randomUUID();f.files.set(image2,f.png);f.store.update(f.id,owner,row.revision,{...row.data,pages:row.data.pages.map((page,index)=>index?{...page,panels:page.panels.map(panel=>({...panel,assetId:image2,revision:2,status:'current' as const,evaluation:'pass' as const}))}:page)});
-    await expect(f.service.publish(owner,f.id,{title:'Public',creator:'Mina'})).rejects.toMatchObject({code:'conflict'});
-    const panel=(await f.service.get(owner,f.id)).comic.pages[0].panels[0];await f.service.acceptPanel(owner,f.id,'p1',panel.reviewVersion!);
+    const row=f.store.getOwned<Draft>(f.id,owner)!,image2=randomUUID();f.files.set(image2,f.png);f.store.update(f.id,owner,row.revision,{...row.data,pages:row.data.pages.map((page,index)=>index?{...page,panels:page.panels.map(panel=>({...panel,assetId:image2,revision:2,status:'checking' as const,evaluation:'uncertain' as const}))}:page)});
+    const draft=(await f.service.get(owner,f.id)).comic,panel=draft.pages[0].panels[0];expect(panel.accepted).toBe(false);expect(draft.pages[1].panels[0].reviewed).toBe(false);
     await f.service.publish(owner,f.id,{title:'Public',creator:'Mina'});
     const listing=await f.service.listPublished(),coverUrl=listing.comics[0].coverUrl!;const cover=new URL(coverUrl,'http://localhost');
     expect(coverUrl).not.toBe((await f.service.getPublished(f.id)).comic.pages[0].imageUrl);

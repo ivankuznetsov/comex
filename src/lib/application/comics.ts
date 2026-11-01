@@ -6,7 +6,7 @@ import stylePresets from '../../../prompts/styles.json';
 import { displayDialogueLines } from '../lettering';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel as acceptPanelInDomain, reviseStory, publishComic, isPanelReady } from '../domain/comic';
 import { ApplicationError, parse, pageIntentMatches, short, createSchema, patchSchema, characterSchema, panelVersionSchema, publishSchema, type Actor, type Character, type ComicDependencies, type ComicRepository, type Draft, type Edition, type PanelReview, type Json } from './contracts';
-import { characterUsedInStory, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, reviewReady, revisionPreview, storyFingerprint, view as projectView } from './views';
+import { characterUsedInStory, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view as projectView } from './views';
 import {sameJson} from './json';
 import {styles as comicStyles} from '../styles';
 type StoryPanel = Storyboard['pages'][number]['panels'][number];
@@ -85,10 +85,6 @@ export function createComicService(deps: ComicDependencies) {
     const store = deps.repository;
     const resolveReviews=(draft:Draft)=>deps.advisory?.resolve?.(draft) ?? draft;
     const view=(draft:Draft,published:Edition|null,revision:number)=>projectView(resolveReviews(draft),published,revision);
-    const reviewed=(draft:Draft,panel:Draft['pages'][number]['panels'][number])=>{
-        const resolved=resolveReviews(draft),current=resolved.pages.flatMap(page=>page.panels).find(item=>item.id===panel.id);
-        return !!current && artworkReady(draft,panel) && reviewReady(resolved,current);
-    };
     function preservePrefixReviews(original:Draft,resolved:Draft,updated:Draft,firstPanelId:string):Draft {
         const before=original.pages.flatMap(page=>page.panels),after=updated.pages.flatMap(page=>page.panels),first=before.findIndex(panel=>panel.id===firstPanelId);
         const panelReviews={...original.panelReviews},panelFindings={...original.panelFindings};
@@ -355,7 +351,7 @@ export function createComicService(deps: ComicDependencies) {
         const next=applied.next,latest=await current(session,id);
         if(latest.data.storyRevision!==next.storyRevision||storyFingerprint(latest.data)!==storyFingerprint(next))throw new ApplicationError('conflict','Story changed while continuing the revision.');
         const firstPage=next.pages.findIndex(page=>page.panels.some(panel=>panel.id===base.proposal.result.earliest_affected_panel_id));
-        const previousReady=firstPage===0||next.pages[firstPage-1].panels.every(p=>reviewed(next,p));let notice='';
+        const previousReady=firstPage===0||next.pages[firstPage-1].panels.every(p=>artworkReady(next,p));let notice='';
         if(previousReady) {
             const pagePanels=next.pages[firstPage].panels,affected=pagePanels.findIndex(panel=>panel.id===base.proposal.result.earliest_affected_panel_id),incomplete=pagePanels.findIndex(panel=>!panel.assetId||panel.status==='outdated'||panel.status==='planned'),first=incomplete>=0?Math.min(incomplete,affected):affected;
             for(const panel of pagePanels.slice(first)){
@@ -559,7 +555,7 @@ export function createComicService(deps: ComicDependencies) {
         const base=await prepared(`${prefix}/prepared`,session,id,expectedRevision,record=>{
             const data=record.data;requireStoryApproval(data);
             const index=data.pages.findIndex(page=>page.id===itemId);if(index<0)throw new ApplicationError('not_found','Page not found.');
-            if(index>0&&data.pages[index-1].panels.some(p=>!reviewed(data,p)))throw new ApplicationError('conflict','Finish and review the preceding page first.');
+            if(index>0&&data.pages[index-1].panels.some(p=>!artworkReady(data,p)))throw new ApplicationError('conflict','Generate the preceding page first.');
             const page=data.pages[index];
             if(body.intent&&!pageIntentMatches(data,itemId,body.intent))throw new ApplicationError('conflict','Page progress changed. Refresh and choose the appropriate action.');
             let operation=data.pageOperations?.[itemId];if(operation&&operation.storyRevision!==data.storyRevision)operation=undefined;
@@ -1130,7 +1126,7 @@ export function createComicService(deps: ComicDependencies) {
         });
         deps.advisory?.narrative(next);
         const firstPage = next.pages.findIndex(page => page.panels.some(panel => panel.id === proposal.result.earliest_affected_panel_id));
-        const previousPageReady = firstPage === 0 || next.pages[firstPage - 1].panels.every(p => reviewed(next,p));
+        const previousPageReady = firstPage === 0 || next.pages[firstPage - 1].panels.every(p => artworkReady(next,p));
         let pausedNotice = '';
         if (previousPageReady) {
             const pagePanels = next.pages[firstPage].panels;
@@ -1175,8 +1171,8 @@ export function createComicService(deps: ComicDependencies) {
         const pageIndex = data.pages.findIndex(p => p.id === itemId);
         if (pageIndex < 0)
             throw new ApplicationError('not_found', 'Page not found.');
-        if (pageIndex > 0 && data.pages[pageIndex - 1].panels.some(p => !reviewed(data,p)))
-            throw new ApplicationError('conflict', 'Finish and review the preceding page first.');
+        if (pageIndex > 0 && data.pages[pageIndex - 1].panels.some(p => !artworkReady(data,p)))
+            throw new ApplicationError('conflict', 'Generate the preceding page first.');
         const requestedPage = data.pages[pageIndex];
         let operation = data.pageOperations?.[requestedPage.id];
         if (operation && operation.storyRevision !== data.storyRevision)
@@ -1291,11 +1287,9 @@ export function createComicService(deps: ComicDependencies) {
         const updated = { ...data, title: body.title, creatorName: body.creator };
         if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !artworkReady(updated,p))))
             throw new ApplicationError('conflict', 'All current panels must be generated before publishing.');
-        const resolved=resolveReviews(updated);
-        if(resolved.pages.some(page=>page.panels.some(panel=>!reviewReady(resolved,panel))))throw new ApplicationError('conflict','Finish checking and accept the findings on every panel before publishing.');
         const pageImages = await composePages(updated);
         const pages = pageImages.map(page => ({ id: page.id, assetId: deps.id(), image: page.image }));
-        const composed = { ...updated, pages: resolved.pages.map((page, i) => ({ ...page, composition: { assetId: pages[i].assetId, panelAssetIds: page.panels.map(panel => panel.assetId!) } })) };
+        const composed = { ...updated, pages: updated.pages.map((page, i) => ({ ...page, composition: { assetId: pages[i].assetId, panelAssetIds: page.panels.map(panel => panel.assetId!) } })) };
         const editionId = deps.id();
         const validated = publishComic(composed, session, updated.storyRevision, editionId);
         if (!validated.published)

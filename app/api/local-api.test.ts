@@ -13,7 +13,7 @@ async function waitForComic(id:string,cookie:string,predicate:(comic:any)=>boole
   throw new Error('Timed out waiting for background review');
 }
 
-test('a held visual review gates progression and cannot overwrite a newer story', async () => {
+test('a held visual review does not block progress or overwrite a newer story', async () => {
   const {mkdtemp,writeFile,rm}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
   const sharp=(await import('sharp')).default; const {createComic}=await import('@/src/lib/domain/comic');
   const dir=await mkdtemp(join(tmpdir(),'comex-background-review-')); const originalFetch=globalThis.fetch;
@@ -35,22 +35,19 @@ test('a held visual review gates progression and cannot overwrite a newer story'
     }) as unknown as typeof fetch;
     const first=await post(`comics/${comic.id}/pages/page1/generate`,{},cookie);expect(first.status).toBe(200);await began;
     const initialResponse=await first.json();expect(initialResponse.comic.pages[0].panels[0].status).toBe('checking');
-    expect((await post(`comics/${comic.id}/pages/page2/generate`,{},cookie)).status).toBe(409);
-    expect((await post(`comics/${comic.id}/publish`,{title:'Background',creator:'Mina'},cookie)).status).toBe(409);
+    const second=await post(`comics/${comic.id}/pages/page2/generate`,{},cookie);expect(second.status).toBe(200);await beganSecond;expect(images).toBe(2);
+    expect((await post(`comics/${comic.id}/publish`,{title:'Background',creator:'Mina'},cookie)).status).toBe(200);
     const beforeReview=store.getOwned<any>(comic.id,owner)!;
     release();
     const reviewed=await waitForComic(comic.id,cookie,c=>c.pages[0].panels[0].reviewOutcome==='findings');
     expect(store.getOwned<any>(comic.id,owner)!.revision).toBe(beforeReview.revision);
-    expect(reviewed.pages[0].panels[0].evaluation).toBe('blocker');
-    expect((await post(`comics/${comic.id}/pages/page2/generate`,{},cookie)).status).toBe(409);
-    expect((await post(`comics/${comic.id}/panels/p1/accept`,reviewed.pages[0].panels[0].reviewVersion,cookie)).status).toBe(200);
-    const second=await post(`comics/${comic.id}/pages/page2/generate`,{},cookie);expect(second.status).toBe(200);await beganSecond;expect(images).toBe(2);
-    expect((await post(`comics/${comic.id}/publish`,{title:'Background',creator:'Mina'},cookie)).status).toBe(409);
+    expect(reviewed.pages[0].panels[0].evaluation).toBe('blocker');expect(reviewed.pages[0].panels[0].accepted).toBe(false);
     // A second late review of an older story must not mutate the new story.
     const afterReview=store.getOwned<any>(comic.id,owner)!;
     expect(store.update(comic.id,owner,afterReview.revision,{...afterReview.data,storyRevision:2})).toBe(true);
     releaseSecond();await new Promise(resolve=>setTimeout(resolve,30));
     const latest=store.getOwned<any>(comic.id,owner)!;expect(latest.data.storyRevision).toBe(2);expect(latest.data.panelReviews?.p2).toBeUndefined();
+    expect((await post(`comics/${comic.id}/unpublish`,{},cookie)).status).toBe(200);
   } finally {release();releaseSecond();await new Promise(resolve=>setTimeout(resolve,20));globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.COMEX_MAX_CONCURRENT_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
 
@@ -903,7 +900,7 @@ test('acceptance applies only to the exact panel image and story version reviewe
   expect(viewed.reviewVersion).toEqual(oldReview);
 });
 
-test('blocker reviews require acceptance before advancing', async () => {
+test('blocker reviews remain advisory when advancing', async () => {
   const {mkdtemp,writeFile,rm}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
   const sharp=(await import('sharp')).default; const {createComic}=await import('@/src/lib/domain/comic');
   const dir=await mkdtemp(join(tmpdir(),'comex-judge-race-'));process.env.COMEX_ASSET_PATH=dir;process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite');process.env.COMEX_MAX_PROVIDER_CALLS='10';process.env.OPENAI_API_KEY='test';
@@ -922,14 +919,12 @@ test('blocker reviews require acceptance before advancing', async () => {
     const checking=(await (await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id])).json()).comic.pages[0].panels[0];
     const acceptance=await post(`comics/${comic.id}/panels/p1/accept`,checking.reviewVersion,cookie);release();await pending;
     expect(acceptance.status).toBe(409);
-    const result=await waitForComic(comic.id,cookie,c=>c.pages[0].panels[0].reviewOutcome==='findings');expect(result.pages[0].status).toBe('needs_review');expect(result.pages[0].panels[0].evaluation).toBe('blocker');expect(result.pages[0].panels[0].accepted).toBe(false);
-    expect((await post(`comics/${comic.id}/pages/page2/generate`,{},cookie)).status).toBe(409);
-    expect((await post(`comics/${comic.id}/panels/p1/accept`,result.pages[0].panels[0].reviewVersion,cookie)).status).toBe(200);
+    const result=await waitForComic(comic.id,cookie,c=>c.pages[0].panels[0].reviewOutcome==='findings');expect(result.pages[0].status).toBe('current');expect(result.pages[0].panels[0].evaluation).toBe('blocker');expect(result.pages[0].panels[0].accepted).toBe(false);
     expect((await post(`comics/${comic.id}/pages/page2/generate`,{},cookie)).status).toBe(200);expect(images).toBe(2);
   } finally {release();globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
 
-test('next page waits for artwork and acceptance of its review', async () => {
+test('next page waits for artwork but not an advisory review', async () => {
   const {mkdtemp,writeFile,rm}=await import('node:fs/promises'); const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
   const sharp=(await import('sharp')).default; const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic');
   const dir=await mkdtemp(join(tmpdir(),'comex-advisory-gate-'));process.env.COMEX_ASSET_PATH=dir;process.env.COMEX_BUDGET_DB_PATH=join(dir,'budget.sqlite');process.env.COMEX_MAX_PROVIDER_CALLS='10';process.env.OPENAI_API_KEY='test';const originalFetch=globalThis.fetch;
@@ -945,10 +940,7 @@ test('next page waits for artwork and acceptance of its review', async () => {
     expect((await post(`comics/${comic.id}/pages/page2/generate`,{},cookie)).status).toBe(409);
     record=store.getOwned<any>(comic.id,owner)!;draft={...record.data,pages:record.data.pages.map((p:any,i:number)=>i? p:{...p,panels:p.panels.map((x:any)=>({...x,status:'checking'}))})};expect(store.update(comic.id,owner,record.revision,draft)).toBe(true);
     globalThis.fetch=(async (url:string|URL|Request)=>String(url).includes('/images/') ? Response.json({data:[{b64_json:png.toString('base64')}]}) : Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({outcome:'inconclusive',findings:[]})}]}]})) as unknown as typeof fetch;
-    expect((await post(`comics/${comic.id}/pages/page2/generate`,{},cookie)).status).toBe(409);
-    record=store.getOwned<any>(comic.id,owner)!;draft={...record.data,pages:record.data.pages.map((p:any,i:number)=>i? p:{...p,panels:p.panels.map((x:any)=>({...x,status:'needs_review'}))})};expect(store.update(comic.id,owner,record.revision,draft)).toBe(true);
-    expect((await post(`comics/${comic.id}/panels/p1/accept`,{assetId:ref,storyRevision:1,panelRevision:2},cookie)).status).toBe(200);
-    const generated=await post(`comics/${comic.id}/pages/page2/generate`,{},cookie);expect(generated.status).toBe(200);const body=await generated.json();expect(body.comic.pages[0].panels[0].accepted).toBe(true);expect(body.comic.pages[1].panels[0].imageUrl).toBeTruthy();
+    const generated=await post(`comics/${comic.id}/pages/page2/generate`,{},cookie);expect(generated.status).toBe(200);const body=await generated.json();expect(body.comic.pages[0].panels[0].accepted).toBe(false);expect(body.comic.pages[1].panels[0].imageUrl).toBeTruthy();
     await waitForComic(comic.id,cookie,c=>c.pages[1].panels[0].reviewOutcome==='inconclusive');
   } finally {globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
@@ -1095,7 +1087,7 @@ test('a successful visual review is distinct from failure and needs no acceptanc
   } finally {globalThis.fetch=originalFetch;delete process.env.COMEX_ASSET_PATH;delete process.env.COMEX_BUDGET_DB_PATH;delete process.env.COMEX_MAX_PROVIDER_CALLS;delete process.env.OPENAI_API_KEY;await rm(dir,{recursive:true,force:true});}
 });
 
-test('publication rejects a background blocker until the current image is accepted', async () => {
+test('publication allows pending and flagged background reviews without acceptance', async () => {
   const {mkdtemp,writeFile,rm}=await import('node:fs/promises');
   const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
   const sharp=(await import('sharp')).default; const {createComic,commitPanelRender}=await import('@/src/lib/domain/comic');
@@ -1113,12 +1105,10 @@ test('publication rejects a background blocker until the current image is accept
     const state={location:'town',time:'day',props:[],outfits:[],injuries:[],knowledge:[]};
     const storyboard={bible:{premise:'Story',setting:'town',rules:[],character_ids:[]},pages:[{index:1,panels:[{id:'p1',index:1,character_ids:[],action:'A scene',framing:'wide',dialogue:[],state_before:state,state_after:state}]}]};
     expect(store.update(comic.id,owner,original.revision,{...original.data,...domain,storyboard})).toBe(true);
+    expect((await post(`comics/${comic.id}/publish`,{title:'Review gate',creator:'A'},cookie)).status).toBe(200);
     store.putAdvisoryReview(comic.id,owner,`panel:p1:${image}:1:2`,{outcome:'findings',findings:[{severity:'blocker',dimension:'story',observed:'Missing light',expected:'Light'}]});
-    expect((await post(`comics/${comic.id}/publish`,{title:'Review gate',creator:'A'},cookie)).status).toBe(409);
     const reviewed=(await (await handleApi(request(`comics/${comic.id}`,'GET',undefined,cookie),['comics',comic.id])).json()).comic.pages[0].panels[0];
     expect(reviewed.evaluation).toBe('blocker');expect(reviewed.accepted).toBe(false);
-    expect((await post(`comics/${comic.id}/panels/p1/accept`,{...reviewed.reviewVersion,panelRevision:1},cookie)).status).toBe(409);
-    expect((await post(`comics/${comic.id}/panels/p1/accept`,reviewed.reviewVersion,cookie)).status).toBe(200);
     expect((await post(`comics/${comic.id}/publish`,{title:'Review gate',creator:'A'},cookie)).status).toBe(200);
   } finally {delete process.env.COMEX_ASSET_PATH;await rm(dir,{recursive:true,force:true});}
 });

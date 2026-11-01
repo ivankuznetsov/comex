@@ -9,7 +9,7 @@ import {createBudgetedFetch, BudgetError} from './budget';
 import {createComicService} from './application/comics';
 import {ApplicationError, createSchema, parse, type Draft} from './application/contracts';
 import {sameJson} from './application/json';
-import {isPanelReady, isPanelReviewed, type Panel} from './domain/comic';
+import {isPanelReady, type Panel} from './domain/comic';
 import {view as comicView} from './application/views';
 import type {PostgresAuth} from './storage/auth';
 export {validateStoryLedger} from './application/comics';
@@ -326,7 +326,7 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
       const raw=local.getOwned<Draft>(id,session);if(!raw)throw new HttpError(404,'Comic not found.');
       const draft=resolveAdvisory(local,raw.data),index=draft.pages.findIndex(page=>page.id===segments[3]);
       if(index<0)throw new HttpError(404,'Page not found.');
-      if(index>0 && draft.pages[index-1].panels.some(panel=>panel.storyRevision!==draft.storyRevision || !isPanelReady(panel) || !!draft.operations?.[`panel:${panel.id}`] || !isPanelReviewed(panel)))throw new HttpError(409,'Finish and review the preceding page first.');
+      if(index>0 && draft.pages[index-1].panels.some(panel=>panel.storyRevision!==draft.storyRevision || !isPanelReady(panel) || !!draft.operations?.[`panel:${panel.id}`]))throw new HttpError(409,'Generate the preceding page first.');
       const reservation=local.beginPageJob(id,session,segments[3],requestId,expected);
       if(!reservation)throw new HttpError(409,'The page is already drawing, needs recovery, or the draft changed. Refresh and try again.');
       if(!reservation.created)return reply({job:publicPageJob(reservation.job,draft),comic:initial},reservation.job.state==='running'?202:200);
