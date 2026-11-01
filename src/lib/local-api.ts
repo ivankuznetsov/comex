@@ -1,5 +1,5 @@
 import { wrapDialogue } from './lettering';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createAIService, AIError, type Storyboard, type Reference, type RevisionResult } from './ai/service';
@@ -12,7 +12,7 @@ import { createBudgetedFetch, BudgetError } from './budget';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel, reviseStory, publishComic, isPanelReady, type ComicDraft } from './domain/comic';
 
 type Character = {id: string; name: string; role: string; appearance: string; outfit: string; referenceUrl?: string; referenceAssetId?: string; approved: boolean};
-type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; storyboard?: Storyboard; storyReview?: unknown; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; panelFindings?: Record<string, unknown[]>; operations?: Record<string, 'running' | 'unknown_outcome'>};
+type Draft = ComicDraft & {characters: Character[]; answers: Record<string,string>; questions: {id: string; question: string; suggestedAnswer?: string}[]; storyboard?: Storyboard; storyReview?: unknown; storyReviewAcceptance?: string; pageOperations?: Record<string, {storyRevision:number; baseline:Record<string,number>}>; pendingRevision?: {id:string; baseRevision:number; result:RevisionResult}; panelFindings?: Record<string, unknown[]>; operations?: Record<string, 'running' | 'unknown_outcome'>};
 type Edition = {id: string; title: string; creator: string; editionId: string; sourceRevision: number; pages: {id: string; imageUrl: string; storage?: 'sqlite'}[]};
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
@@ -62,9 +62,10 @@ function owned(request: NextRequest, id: string) {
   return {session, store, ...record};
 }
 function view(draft: Draft, published: Edition | null, revision: number) {
+  const reviewFingerprint = narrativeFingerprint(draft);
   return {
     id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId,
-    characters: draft.characters.map(({referenceAssetId: _, ...character}) => character), questions: draft.questions, answers: draft.answers, storyReview: draft.storyReview ?? null,
+    characters: draft.characters.map(({referenceAssetId: _, ...character}) => character), questions: draft.questions, answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:!!reviewFingerprint && draft.storyReviewAcceptance === reviewFingerprint} : null,
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1,
       status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => p.storyRevision === draft.storyRevision && isPanelReady(p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
       panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, findings: draft.panelFindings?.[p.id] ?? [], accepted: isPanelReady(p) && p.status === 'needs_review', imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null}))})),
@@ -75,6 +76,11 @@ function view(draft: Draft, published: Edition | null, revision: number) {
 function save(store: LocalStore, session: string, revision: number, draft: Draft) {
   if (!store.update(draft.id, session, revision, draft)) throw new HttpError(409, 'This draft changed. Refresh and try again.');
   return view(draft, store.getPublished<Edition>(draft.id), revision + 1);
+}
+
+/** Give each saved answer its question context, never just an opaque model ID. */
+function answeredQuestions(draft: Draft): Record<string,string> {
+  return Object.fromEntries(draft.questions.filter(question => draft.answers[question.id]?.trim()).map(question => [question.question, draft.answers[question.id].trim()]));
 }
 /** The reservation is persisted separately so a crash cannot silently cause a duplicate paid dispatch. */
 async function withTextOperation<T>(store: LocalStore, session: string, id: string, revision: number, task: () => Promise<T>): Promise<T> {
@@ -130,10 +136,18 @@ async function asset(id: string): Promise<Buffer> {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new HttpError(404, 'Image not found.');
   try { return await readFile(resolve(assetRoot(), `${id}.png`)); } catch { throw new HttpError(404, 'Image not found.'); }
 }
-function hasNarrativeBlocker(draft: Draft): boolean {
+function narrativeFingerprint(draft: Draft): string | null {
+  if (!draft.storyboard || !draft.storyReview || typeof draft.storyReview !== 'object') return null;
+  return createHash('sha256').update(JSON.stringify({revision:draft.storyRevision,storyboard:draft.storyboard,review:draft.storyReview})).digest('hex');
+}
+function rawNarrativeBlocker(draft: Draft): boolean {
   const review = draft.storyReview;
   if (!review || typeof review !== 'object' || !('findings' in review) || !Array.isArray(review.findings)) return false;
   return review.findings.some((finding: unknown) => !!finding && typeof finding === 'object' && 'severity' in finding && finding.severity === 'blocker');
+}
+function hasNarrativeBlocker(draft: Draft): boolean {
+  const fingerprint = narrativeFingerprint(draft);
+  return rawNarrativeBlocker(draft) && (!fingerprint || draft.storyReviewAcceptance !== fingerprint);
 }
 function requireClearNarrative(draft: Draft): void {
   if (hasNarrativeBlocker(draft)) throw new HttpError(409, 'Resolve the story review blockers before generating artwork.');
@@ -375,24 +389,39 @@ export async function handleApi(request: NextRequest, segments: string[]) {
     if (segments[2] === 'questions' && segments.length === 3 && method === 'POST') {
       await input(request, z.object({}).strict());
       return await withTextOperation(store,session,id,revision,async () => {
-      const questions = await ai().questions({plot:data.plot, style:data.styleId, answers:data.answers, limit:5});
-      return reply({comic: save(store, session, revision, {...data, questions})});
+      const answered = data.questions.filter(question => data.answers[question.id]?.trim());
+      const limit = Math.max(0, 5 - answered.length);
+      const additions = limit ? await ai().questions({plot:data.plot, style:data.styleId, answers:answeredQuestions(data), limit}) : [];
+      const seen = new Set(answered.map(question => question.question.trim().toLocaleLowerCase('en-US')));
+      const questions = [...answered];
+      for (const question of additions) {
+        const key = question.question.trim().toLocaleLowerCase('en-US');
+        if (!seen.has(key)) { seen.add(key); questions.push({...question,id:randomUUID()}); }
+      }
+      const answers = Object.fromEntries(answered.map(question => [question.id,data.answers[question.id]]));
+      return reply({comic: save(store, session, revision, {...data, questions, answers})});
       });
+    }
+    if (segments[2] === 'story' && segments[3] === 'accept' && segments.length === 4 && method === 'POST') {
+      const body = await input(request,z.object({fingerprint:z.string().regex(/^[a-f0-9]{64}$/)}).strict());
+      const fingerprint = narrativeFingerprint(data);
+      if (!fingerprint || body.fingerprint !== fingerprint || !rawNarrativeBlocker(data) || !data.storyReview || typeof data.storyReview !== 'object' || !('outcome' in data.storyReview) || data.storyReview.outcome !== 'findings') throw new HttpError(409,'This story review has changed or is not eligible for acceptance.');
+      return await withTextOperation(store,session,id,revision,async () => reply({comic:save(store,session,revision,{...data,storyReviewAcceptance:fingerprint})}));
     }
     if (segments[2] === 'story' && segments[3] === 'plan' && segments.length === 4 && method === 'POST') {
       await input(request, z.object({}).strict());
       if (data.pages.length) throw new HttpError(409, 'Use story revision to change existing pages.');
       if (!data.characters.length || data.characters.some(c => !c.approved || !c.referenceAssetId)) throw new HttpError(409, 'Approve reference images for every selected character first.');
       return await withTextOperation(store,session,id,revision,async () => {
-      const storyboard = await ai().storyboard({plot:data.plot, answers:data.answers, styleRules:styleRules(data.styleId), characters:data.characters, pageCount:3, panelsPerPage:3});
+      const storyboard = await ai().storyboard({plot:data.plot, answers:answeredQuestions(data), styleRules:styleRules(data.styleId), characters:data.characters, pageCount:3, panelsPerPage:3});
       const ledgerErrors = validateStoryLedger(storyboard);
       if (ledgerErrors.length) throw new HttpError(422, `Story state needs correction: ${ledgerErrors[0]}`);
       const planned = createComic({id, ownerId:session, title:data.title, creatorName:data.creatorName, plot:data.plot, styleId:data.styleId,
         pages:storyboard.pages.map(p => ({id:randomUUID(), panels:p.panels.map(panel => ({id:panel.id, beat:panel.action}))}))});
       let storyReview: unknown;
-      try { storyReview = await ai().narrativeJudge({creatorGoal:data.plot,answers:data.answers,bible:storyboard.bible,beats:storyboard.pages}); }
+      try { storyReview = await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages}); }
       catch (error) { storyReview = inconclusiveReview(error); }
-      return reply({comic: save(store, session, revision, {...data, ...planned, storyboard, storyReview})});
+      return reply({comic: save(store, session, revision, {...data, ...planned, storyboard, storyReview, storyReviewAcceptance:undefined})});
       });
     }
     if (segments[2] === 'characters' && segments.length === 5 && segments[4] === 'reference' && method === 'POST') {
@@ -477,21 +506,32 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       const beats = Object.fromEntries(proposal.result.revised_suffix.map(panel => [panel.id,panel.action]));
       const updated = reviseStory(data,session,data.storyRevision,proposal.result.earliest_affected_panel_id,beats) as Draft;
       let storyReview: unknown;
-      try { storyReview = await ai().narrativeJudge({creatorGoal:data.plot,answers:data.answers,bible:storyboard.bible,beats:storyboard.pages}); }
+      try { storyReview = await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages}); }
       catch (error) { storyReview = inconclusiveReview(error); }
-      const next: Draft = {...updated,storyboard,storyReview,pendingRevision:undefined};
+      const next: Draft = {...updated,storyboard,storyReview,storyReviewAcceptance:undefined,pendingRevision:undefined,pageOperations:undefined};
       if (!store.update(id,session,revision,next)) throw new HttpError(409,'Draft changed while applying revision; preview it again.');
       return next;
       });
       const firstPage = next.pages.findIndex(page => page.panels.some(panel => panel.id === proposal.result.earliest_affected_panel_id));
       const previousPageReady = firstPage === 0 || next.pages[firstPage-1].panels.every(p => p.storyRevision === next.storyRevision && isPanelReady(p));
+      let pausedNotice = '';
       if (previousPageReady && !hasNarrativeBlocker(next)) {
         const pagePanels = next.pages[firstPage].panels;
-        const first = pagePanels.findIndex(panel => panel.id === proposal.result.earliest_affected_panel_id);
-        for (const panel of pagePanels.slice(first)) await renderPanel(store,session,id,panel.id);
+        const affected = pagePanels.findIndex(panel => panel.id === proposal.result.earliest_affected_panel_id);
+        const firstIncomplete = pagePanels.findIndex(panel => !panel.assetId || panel.status === 'outdated' || panel.status === 'planned');
+        const first = firstIncomplete >= 0 ? Math.min(firstIncomplete, affected) : affected;
+        for (const panel of pagePanels.slice(first)) {
+          try { await renderPanel(store,session,id,panel.id); }
+          catch { pausedNotice = 'Story change saved, but artwork did not finish. Review the page and resolve any outstanding operation before continuing.'; break; }
+          const currentPanel = store.getOwned<Draft>(id,session)?.data.pages[firstPage].panels.find(p => p.id === panel.id);
+          if (!currentPanel || (currentPanel.evaluation === 'blocker' && !isPanelReady(currentPanel))) {
+            pausedNotice = 'Story change saved. Review the panel blocker before continuing the page.';
+            break;
+          }
+        }
       }
       const latest = store.getOwned<Draft>(id,session)!;
-      return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision),notice:hasNarrativeBlocker(next) ? 'Resolve the story review blockers before generating artwork.' : 'Later pages remain outdated until you review the preceding page and generate them.'});
+      return reply({comic:view(latest.data,store.getPublished<Edition>(id),latest.revision),notice:pausedNotice || (hasNarrativeBlocker(next) ? 'Resolve the story review blockers before generating artwork.' : 'Later pages remain outdated until you review the preceding page and generate them.')});
     }
     if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'download' && method === 'GET') {
       const page = data.pages.find(p => p.id === segments[3]);
@@ -510,10 +550,12 @@ export async function handleApi(request: NextRequest, segments: string[]) {
       const requestedPage = data.pages[pageIndex];
       if (requestedPage.panels.some(p => p.status === 'checking')) throw new HttpError(409, 'Wait for the panel review to finish.');
       let operation = data.pageOperations?.[requestedPage.id];
+      if (operation && operation.storyRevision !== data.storyRevision) operation = undefined;
       if (!operation) {
         // A complete page click explicitly regenerates all panels. An incomplete page resumes missing/outdated panels.
         const fullyRendered = requestedPage.panels.every(p => !!p.assetId && p.storyRevision === data.storyRevision && (p.status === 'current' || p.status === 'needs_review'));
-        const targets = requestedPage.panels.filter(p => fullyRendered || !p.assetId || p.storyRevision !== data.storyRevision || !['current','needs_review'].includes(p.status));
+        const firstIncomplete = requestedPage.panels.findIndex(p => !p.assetId || p.storyRevision !== data.storyRevision || !['current','needs_review'].includes(p.status));
+        const targets = fullyRendered ? requestedPage.panels : requestedPage.panels.slice(firstIncomplete);
         operation = {storyRevision:data.storyRevision,baseline:Object.fromEntries(targets.map(p => [p.id,p.revision]))};
         if (!store.update(id,session,revision,{...data,pageOperations:{...data.pageOperations,[requestedPage.id]:operation}})) throw new HttpError(409,'Draft changed; refresh and try again.');
       }

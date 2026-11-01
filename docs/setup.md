@@ -35,3 +35,17 @@ COMEX_RESERVATION_ID="REPLACE_WITH_ID" COMEX_BUDGET_DB_PATH="${COMEX_BUDGET_DB_P
 ```
 
 This only reconciles the provider budget. A draft may separately retain a `running` or `unknown_outcome` operation after a crash; resolving the budget does not clear that draft lock or recover its output.
+
+To release a specific stuck image operation, first stop **all** Comex processes, back up the draft database, investigate the provider's outcome and reconcile any corresponding budget reservation as described above. Set `COMEX_DB_PATH` to the server's draft database. Find the comic ID in its URL, and list the exact image operations:
+
+```sh
+COMEX_DB_PATH=/path/to/comex.sqlite bun scripts/resolve-image-operation.ts COMIC_ID --list
+```
+
+After investigation, release the selected `panel:<panel-id>` or `character:<character-id>` operation:
+
+```sh
+COMEX_DB_PATH=/path/to/comex.sqlite bun scripts/resolve-image-operation.ts COMIC_ID panel:PANEL_ID --confirm
+```
+
+The command releases only that operation, increments the draft revision and never refunds the call or retries it. If the provider completed work that was not saved, a later user-initiated retry can incur another charge. Do not run it while any request may still be in flight. Story-text operations use the separate recovery procedure above.

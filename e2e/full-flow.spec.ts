@@ -14,19 +14,21 @@ test('creator plans, draws, edits, publishes and revises a three-page comic', as
   await expect(page).toHaveURL(/\/comics\//);
   await page.getByRole('button', { name: 'Ask story questions' }).click();
   await page.getByLabel('What does Mina want?').fill('Deliver the key safely');
-  await page.getByRole('button', { name: 'Save answers' }).click();
-  await expect(page.getByText('Answers saved.')).toBeVisible();
   await page.getByLabel('name', { exact: true }).fill('Mina');
   await page.getByLabel('role', { exact: true }).fill('Courier');
   await page.getByLabel('appearance', { exact: true }).fill('Short red hair');
   await page.getByLabel('outfit', { exact: true }).fill('Yellow coat');
   await page.getByRole('button', { name: 'Add character' }).click();
+  await expect(page.getByLabel('What does Mina want?')).toHaveValue('Deliver the key safely');
   await page.getByRole('button', { name: 'Create reference' }).click();
   await expect(page.getByAltText('Reference for Mina')).toBeVisible();
   await page.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(page.getByText('Approved', { exact:true })).toBeVisible();
   await page.getByRole('button', { name: /Plan story/ }).click();
   await expect(page.getByText('Story review: pass')).toBeVisible();
+  const savedDraft = await page.request.get(new URL(page.url()).pathname.replace('/comics/', '/api/comics/'));
+  const savedAnswers = (await savedDraft.json()).comic.answers as Record<string,string>;
+  expect(Object.values(savedAnswers)).toContain('Deliver the key safely');
   for (let i = 1; i <= 3; i++) {
     await page.getByRole('button', { name: `Page ${i}`, exact:true }).click();
     await page.getByRole('button', { name:'Generate page', exact:true }).click();
