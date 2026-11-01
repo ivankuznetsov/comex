@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import {ApplicationError, type Draft} from './application/contracts';
-import {renderCaption} from './caption';
+import {renderCaption, type CaptionLine} from './caption';
 
 export async function composePages(draft: Draft, asset: (id:string) => Promise<Buffer>): Promise<{
     id: string;
@@ -26,10 +26,10 @@ export async function composePages(draft: Draft, asset: (id:string) => Promise<B
             if (!panel.assetId || !spec)
                 throw new ApplicationError('conflict', 'A page is missing its current panel.');
             const image = await sharp(await asset(panel.assetId)).resize(panelWidth, panelHeight, { fit: 'contain', background: '#fffef8' }).png().toBuffer();
-            const dialogue: string[] = [];
+            const dialogue: CaptionLine[] = [];
             for (const entry of spec.dialogue) {
                 const name = draft.characters.find(c => c.id === entry.speaker_id)?.name ?? entry.speaker_id;
-                dialogue.push(`${name}: ${entry.text}`);
+                dialogue.push({speaker:name,text:entry.text});
             }
             sections.push({ image, caption: await renderCaption(dialogue, panelWidth) });
         }
@@ -47,6 +47,10 @@ export async function composePages(draft: Draft, asset: (id:string) => Promise<B
             let rowHeight = panelHeight;
             row.forEach((section, column) => {
                 const x = grid && row.length === 1 ? (1020 - panelWidth) / 2 : 20 + column * (panelWidth + 20);
+                // Ink frame lives entirely in the gutter: not one artwork pixel is covered.
+                const framedHeight=panelHeight+(section.caption?.height??0);
+                const frame=Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${panelWidth+8}" height="${framedHeight+8}"><rect x="2" y="2" width="${panelWidth+4}" height="${framedHeight+4}" fill="none" stroke="#211d19" stroke-width="4"/></svg>`);
+                composites.push({input:frame,top:y-4,left:x-4});
                 composites.push({ input: section.image, top: y, left: x });
                 if (section.caption) {
                     const h = section.caption.height;
