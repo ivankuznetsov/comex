@@ -23,7 +23,7 @@ Dot can use supported plugins installed and enabled for your account, subject to
 
 ## Create and review
 
-Ask the assistant to start or continue a comic. It should use the same saved questions, suggested answers, character cards, story, and review choices as the Comex editor. The questions are generated for the draft and are not automatically answered. Review references, story beats, and panel findings before explicitly approving or accepting the displayed version. A refreshed draft may require a new approval.
+Ask the assistant to start or continue a comic. Choose 1–10 pages before planning (the default is 3); agents can set `pageCount` when creating or updating a draft. The editor offers the same Pages selector beside Panels per page. Once planned, the page count stays fixed to preserve existing artwork. It should use the same saved questions, suggested answers, character cards, story, and review choices as the Comex editor. The questions are generated for the draft and are not automatically answered. Review references, story beats, and panel findings before explicitly approving or accepting the displayed version. A refreshed draft may require a new approval.
 
 The local editor runs reviews in the background; a hosted generation operation currently waits for its review before completing. Review findings are advisory and do not prevent drawing later pages or publishing complete artwork.
 
