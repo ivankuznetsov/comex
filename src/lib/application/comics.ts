@@ -6,7 +6,7 @@ import stylePresets from '../../../prompts/styles.json';
 import { displayDialogueLines } from '../lettering';
 import { createBlankComic, createComic, commitPanelRender, acceptPanel as acceptPanelInDomain, reviseStory, publishComic, isPanelReady } from '../domain/comic';
 import { ApplicationError, parse, pageIntentMatches, short, createSchema, patchSchema, characterSchema, panelVersionSchema, publishSchema, type Actor, type Character, type ComicDependencies, type ComicRepository, type Draft, type Edition, type PanelReview, type Json } from './contracts';
-import { isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, revisionPreview, storyFingerprint, view } from './views';
+import { characterUsedInStory, isStoryApproved, narrativeFingerprint, publicView, rawNarrativeBlocker, reviewReady, revisionPreview, storyFingerprint, view as projectView } from './views';
 import {sameJson} from './json';
 import {styles as comicStyles} from '../styles';
 type StoryPanel = Storyboard['pages'][number]['panels'][number];
@@ -83,6 +83,24 @@ export const durableComicServiceVersion='comex-durable-service-v1' as const;
 /** Domain orchestration with no request, cookie, or HTTP response dependency. */
 export function createComicService(deps: ComicDependencies) {
     const store = deps.repository;
+    const resolveReviews=(draft:Draft)=>deps.advisory?.resolve?.(draft) ?? draft;
+    const view=(draft:Draft,published:Edition|null,revision:number)=>projectView(resolveReviews(draft),published,revision);
+    const reviewed=(draft:Draft,panel:Draft['pages'][number]['panels'][number])=>{
+        const resolved=resolveReviews(draft),current=resolved.pages.flatMap(page=>page.panels).find(item=>item.id===panel.id);
+        return !!current && artworkReady(draft,panel) && reviewReady(resolved,current);
+    };
+    function preservePrefixReviews(original:Draft,resolved:Draft,updated:Draft,firstPanelId:string):Draft {
+        const before=original.pages.flatMap(page=>page.panels),after=updated.pages.flatMap(page=>page.panels),first=before.findIndex(panel=>panel.id===firstPanelId);
+        const panelReviews={...original.panelReviews},panelFindings={...original.panelFindings};
+        for(let index=0;index<first;index++) {
+            const prior=before[index],next=after[index],review=resolved.panelReviews?.[prior.id];
+            if(review && prior.assetId && review.assetId===prior.assetId && review.storyRevision===prior.storyRevision && review.panelRevision===prior.revision) {
+                panelReviews[prior.id]={...review,storyRevision:next.storyRevision,panelRevision:next.revision};
+                panelFindings[prior.id]=resolved.panelFindings?.[prior.id] ?? [];
+            }
+        }
+        return {...updated,panelReviews,panelFindings};
+    }
     const ai = () => deps.provider({ fetch: deps.budgetFetch });
     const asset = async (id: string) => await deps.assets.read(id);
     const saveAsset = async (bytes: Buffer) => {
@@ -296,7 +314,7 @@ export function createComicService(deps: ComicDependencies) {
             if(base.data.pages.findIndex(page=>page.panels.some(panel=>panel.id===result.earliest_affected_panel_id))<0)throw new ApplicationError('invalid_story','Revision points to a missing panel.');
             return await settled(`${prefix}/completed`,async tx=>{
                 const latest=await tx.getOwned<Draft>(id,session);if(!latest||latest.revision!==base.revision)throw new ApplicationError('conflict','Draft changed while planning the revision; refresh and try again.');
-                const proposal={id:deps.id(),baseRevision:latest.revision+1,baseStoryRevision:base.data.storyRevision,result};
+                const proposal={id:deps.id(),baseRevision:latest.revision+1,baseStoryRevision:base.data.storyRevision,result,instruction:body.instruction};
                 const pendingArtworkDecision=base.data.pendingArtworkDecision?.panelId===body.panelId&&base.data.pendingArtworkDecision.instruction===body.instruction?undefined:base.data.pendingArtworkDecision;
                 const updated={...latest.data,pendingRevision:proposal,pendingArtworkDecision};
                 if(!(await tx.update(id,session,latest.revision,updated)))throw new ApplicationError('conflict','Draft changed while planning the revision; refresh and try again.');
@@ -321,7 +339,8 @@ export function createComicService(deps: ComicDependencies) {
                 const storyboard:Storyboard={...base.data.storyboard!,bible:base.proposal.result.revised_bible,pages:base.data.storyboard!.pages.map(page=>({...page,panels:page.panels.map(panel=>changed.get(panel.id)??panel)}))};
                 const errors=validateStoryLedger(storyboard);if(errors.length)throw new ApplicationError('invalid_story',`Revised story state needs correction: ${errors[0]}`);
                 const beats=Object.fromEntries(base.proposal.result.revised_suffix.map(panel=>[panel.id,panel.action]));
-                const updated=reviseStory(base.data,session,base.data.storyRevision,base.proposal.result.earliest_affected_panel_id,beats) as Draft;
+                const resolved=resolveReviews(base.data);
+                const updated=preservePrefixReviews(base.data,resolved,reviseStory(resolved,session,base.data.storyRevision,base.proposal.result.earliest_affected_panel_id,beats) as Draft,base.proposal.result.earliest_affected_panel_id);
                 const latest=await current(session,id);if(latest.revision!==base.revision)throw new ApplicationError('conflict','Draft changed while applying revision; preview it again.');
                 const input={creatorGoal:base.data.plot,answers:answeredQuestions(base.data),bible:storyboard.bible,beats:storyboard.pages};
                 let storyReview:unknown;try{storyReview=await durable().paid({id:`${prefix}/narrative`,input:asJson(input),expectedRevision:latest.revision},fetch=>deps.provider({fetch}).narrativeJudge(input));}catch(error){if(!(error instanceof AIError)&&!(error instanceof BudgetError))throw error;storyReview=inconclusiveReview(error);}
@@ -336,7 +355,7 @@ export function createComicService(deps: ComicDependencies) {
         const next=applied.next,latest=await current(session,id);
         if(latest.data.storyRevision!==next.storyRevision||storyFingerprint(latest.data)!==storyFingerprint(next))throw new ApplicationError('conflict','Story changed while continuing the revision.');
         const firstPage=next.pages.findIndex(page=>page.panels.some(panel=>panel.id===base.proposal.result.earliest_affected_panel_id));
-        const previousReady=firstPage===0||next.pages[firstPage-1].panels.every(p=>artworkReady(next,p));let notice='';
+        const previousReady=firstPage===0||next.pages[firstPage-1].panels.every(p=>reviewed(next,p));let notice='';
         if(previousReady) {
             const pagePanels=next.pages[firstPage].panels,affected=pagePanels.findIndex(panel=>panel.id===base.proposal.result.earliest_affected_panel_id),incomplete=pagePanels.findIndex(panel=>!panel.assetId||panel.status==='outdated'||panel.status==='planned'),first=incomplete>=0?Math.min(incomplete,affected):affected;
             for(const panel of pagePanels.slice(first)){
@@ -392,7 +411,7 @@ export function createComicService(deps: ComicDependencies) {
     async function durableReference(session:Actor,id:string,itemId:string,payload:unknown,expectedRevision?:number) {
         parse(payload,z.object({}).strict());const prefix=`character/${itemId}`;
         const base=await prepared(`${prefix}/prepared`,session,id,expectedRevision,record=>{
-            if(record.data.pages.length)throw new ApplicationError('conflict','Character changes require a story revision.');
+            if(characterUsedInStory(record.data,itemId))throw new ApplicationError('conflict','This character is already in the story. Changing their reference requires revising the story.');
             const character=record.data.characters.find(c=>c.id===itemId);if(!character)throw new ApplicationError('not_found','Character not found.');
             if(record.data.operations?.[`character:${itemId}`])throw new ApplicationError('conflict','This image request is already running or has an unknown outcome.');
             return {...record,character};
@@ -412,7 +431,7 @@ export function createComicService(deps: ComicDependencies) {
                 if(state!=='completed' && state!=='failed')throw new AIError('unknown_outcome','The previous reference outcome is still unknown.');
                 await settled(`${prefix}/resumed`,async tx=>{const now=await tx.getOwned<Draft>(id,session);if(!now||now.data.operations?.[op]!=='unknown_outcome'||now.data.durableOperationMarkers?.[op]!==reservation.marker)throw new ApplicationError('conflict','The previous unknown reference is not available to resume.');if(!(await tx.update(id,session,now.revision,{...now.data,operations:{...now.data.operations,[op]:'running'}})))throw new ApplicationError('conflict','Draft changed while resuming the reference.');return {revision:now.revision+1};});
             }
-            const valid=(data:Draft)=>data.operations?.[op]==='running' && data.durableOperationMarkers?.[op]===reservation.marker && !data.pages.length && data.styleId===base.data.styleId && same(data.characters.find(c=>c.id===itemId),base.character);
+            const valid=(data:Draft)=>data.operations?.[op]==='running' && data.durableOperationMarkers?.[op]===reservation.marker && !characterUsedInStory(data,itemId) && data.styleId===base.data.styleId && same(data.characters.find(c=>c.id===itemId),base.character);
             const now=await current(session,id);if(!valid(now.data))throw new ApplicationError('conflict','Character inputs changed while rendering; the result was not applied.');
             const input={character:base.character,styleRules:styleRules(base.data.styleId)};
             const bytes=await durable().paid({id:step,input:asJson(input),expectedRevision:now.revision},fetch=>deps.provider({fetch}).characterReference(input));
@@ -524,8 +543,8 @@ export function createComicService(deps: ComicDependencies) {
         await settled(`${prefix}/reviewed`,async tx=>{
             const now=await tx.getOwned<Draft>(comicId,session);if(!now||!reviewValid(now.data))throw new ApplicationError('conflict','Panel changed while saving the review.');
             const p=now.data.pages.flatMap(page=>page.panels).find(panel=>panel.id===panelId)!;
-            const evaluation=findings.some(f=>f.severity==='blocker')?'blocker':findings.some(f=>f.severity==='warning')?'warning':'uncertain';
-            const pages=now.data.pages.map(page=>({...page,panels:page.panels.map(panel=>panel.id===panelId?{...panel,evaluation,status:'needs_review' as const,acceptance:null}:panel)}));
+            const evaluation=findings.some(f=>f.severity==='blocker')?'blocker':findings.some(f=>f.severity==='warning')?'warning':outcome==='pass'?'pass':'uncertain';
+            const pages=now.data.pages.map(page=>({...page,panels:page.panels.map(panel=>panel.id===panelId?{...panel,evaluation,status:evaluation==='pass'?'current' as const:'needs_review' as const,acceptance:null}:panel)}));
             const operations={...now.data.operations},durableOperationMarkers={...now.data.durableOperationMarkers};
             if(reviewUnknown){if(operations[op]!=='unknown_outcome'||durableOperationMarkers[op]!==reviewUnknown.marker)throw new ApplicationError('conflict','Panel review belongs to another operation.');delete operations[op];delete durableOperationMarkers[op];}
             if(!(await tx.update(comicId,session,now.revision,{...now.data,pages,operations,durableOperationMarkers,panelFindings:{...now.data.panelFindings,[panelId]:findings},panelReviews:{...now.data.panelReviews,[panelId]:{assetId,storyRevision:base.data.storyRevision,panelRevision:p.revision,outcome}}})))throw new ApplicationError('conflict','Draft changed while saving the review.');
@@ -540,7 +559,7 @@ export function createComicService(deps: ComicDependencies) {
         const base=await prepared(`${prefix}/prepared`,session,id,expectedRevision,record=>{
             const data=record.data;requireStoryApproval(data);
             const index=data.pages.findIndex(page=>page.id===itemId);if(index<0)throw new ApplicationError('not_found','Page not found.');
-            if(index>0&&data.pages[index-1].panels.some(p=>!artworkReady(data,p)))throw new ApplicationError('conflict','Review and accept the preceding page first.');
+            if(index>0&&data.pages[index-1].panels.some(p=>!reviewed(data,p)))throw new ApplicationError('conflict','Finish and review the preceding page first.');
             const page=data.pages[index];
             if(body.intent&&!pageIntentMatches(data,itemId,body.intent))throw new ApplicationError('conflict','Page progress changed. Refresh and choose the appropriate action.');
             let operation=data.pageOperations?.[itemId];if(operation&&operation.storyRevision!==data.storyRevision)operation=undefined;
@@ -683,8 +702,8 @@ export function createComicService(deps: ComicDependencies) {
         const current = latest.data.pages.flatMap(p => p.panels).find(p => p.id === panelId);
         if (!current || current.assetId !== assetId || current.storyRevision !== draft.storyRevision || current.revision !== panel.revision + 1 || current.status !== 'checking')
             return;
-        const evaluation = findings.some(f => f.severity === 'blocker') ? 'blocker' : findings.some(f => f.severity === 'warning') ? 'warning' : 'uncertain';
-        const pages = latest.data.pages.map(page => ({ ...page, panels: page.panels.map(p => p.id === panelId ? { ...p, evaluation, status: 'needs_review' as const, acceptance: null } : p) }));
+        const evaluation = findings.some(f => f.severity === 'blocker') ? 'blocker' : findings.some(f => f.severity === 'warning') ? 'warning' : outcome === 'pass' ? 'pass' : 'uncertain';
+        const pages = latest.data.pages.map(page => ({ ...page, panels: page.panels.map(p => p.id === panelId ? { ...p, evaluation, status: evaluation === 'pass' ? 'current' as const : 'needs_review' as const, acceptance: null } : p) }));
         const panelFindings = { ...latest.data.panelFindings, [panelId]: findings };
         const panelReviews = { ...latest.data.panelReviews, [panelId]: { assetId, storyRevision: draft.storyRevision, panelRevision: current.revision, outcome } };
         if (!(await store.update(comicId, session, latest.revision, { ...latest.data, pages, panelFindings, panelReviews })))
@@ -717,7 +736,7 @@ export function createComicService(deps: ComicDependencies) {
                 const lines: string[] = [];
                 for (const dialogue of spec.dialogue) {
                     const name = draft.characters.find(c => c.id === dialogue.speaker_id)?.name ?? dialogue.speaker_id;
-                    lines.push(...displayDialogueLines(`${name}: ${dialogue.text}`, grid ? 17 : 25));
+                    lines.push(...displayDialogueLines(`${name}: ${dialogue.text}`, grid ? 20 : 42));
                 }
                 sections.push({ image, lines });
             }
@@ -734,7 +753,7 @@ export function createComicService(deps: ComicDependencies) {
             for (const row of rows) {
                 let rowHeight = panelHeight;
                 row.forEach((section, column) => {
-                    const x = 20 + column * (panelWidth + 20);
+                    const x = grid && row.length === 1 ? (1020 - panelWidth) / 2 : 20 + column * (panelWidth + 20);
                     composites.push({ input: section.image, top: y, left: x });
                     if (section.lines.length) {
                         const h = section.lines.length * 30 + 24;
@@ -777,7 +796,7 @@ export function createComicService(deps: ComicDependencies) {
     }
     async function listPublished() {
         const editions = (await store.listPublished<Edition>());
-        return { comics: editions.map(e => ({ id: e.id, title: e.title, creator: e.creator, pageCount: e.pages.length, coverUrl: e.pages[0]?.imageUrl ?? null })) };
+        return { comics: editions.map(e => ({ id: e.id, title: e.title, creator: e.creator, pageCount: e.pages.length, coverUrl: e.coverUrl ?? e.pages[0]?.imageUrl ?? null })) };
     }
     async function getPublished(id: string) {
         const edition = (await store.getPublished<Edition>(id));
@@ -791,9 +810,9 @@ export function createComicService(deps: ComicDependencies) {
             throw new ApplicationError('not_found', 'This edition is unavailable. Reload the comic.');
         const imageUrl = `/api/published/${encodeURIComponent(edition.id)}/assets/${encodeURIComponent(itemId)}?edition=${encodeURIComponent(edition.editionId)}`;
         const page = edition.pages.find(p => p.imageUrl === imageUrl);
-        if (!page)
+        if (!page && edition.coverUrl !== imageUrl)
             throw new ApplicationError('not_found', 'Image not found.');
-        const bytes = page.storage === 'sqlite' ? (await store.getPublicationAsset(edition.id, itemId)) : await asset(itemId);
+        const bytes = !page || page.storage === 'sqlite' ? (await store.getPublicationAsset(edition.id, itemId)) : await asset(itemId);
         if (!bytes)
             throw new ApplicationError('not_found', 'Image not found.');
         return bytes;
@@ -918,8 +937,8 @@ export function createComicService(deps: ComicDependencies) {
     async function acceptStoryReview(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
         const body = parse(payload, z.object({ fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict());
-        const fingerprint = narrativeFingerprint(data);
-        if (!fingerprint || body.fingerprint !== fingerprint || !rawNarrativeBlocker(data) || !data.storyReview || typeof data.storyReview !== 'object' || !('outcome' in data.storyReview) || data.storyReview.outcome !== 'findings')
+        const resolved=resolveReviews(data),fingerprint = narrativeFingerprint(resolved),review=resolved.storyReview;
+        if (!fingerprint || body.fingerprint !== fingerprint || !rawNarrativeBlocker(resolved) || !review || typeof review !== 'object' || !('outcome' in review) || review.outcome !== 'findings')
             throw new ApplicationError('conflict', 'This story review has changed or is not eligible for acceptance.');
         return await withTextOperation(store, session, id, revision, async () => ({ comic: (await save(store, session, revision, { ...data, storyReviewAcceptance: fingerprint })) }));
     }
@@ -929,8 +948,8 @@ export function createComicService(deps: ComicDependencies) {
         const fingerprint = storyFingerprint(data);
         if (!fingerprint || body.revision !== revision || body.storyRevision !== data.storyRevision || body.fingerprint !== fingerprint)
             throw new ApplicationError('conflict', 'This story changed since you reviewed it. Refresh and review the current story.');
-        if (data.characters.some(character => !character.approved || !character.referenceAssetId))
-            throw new ApplicationError('conflict', 'Approve all character references before approving the story.');
+        if (data.characters.some(character => characterUsedInStory(data,character.id) && (!character.approved || !character.referenceAssetId)))
+            throw new ApplicationError('conflict', 'Approve all story character references before approving the story.');
         return {comic:await save(store, session, revision, {...data, storyApproval:{storyRevision:data.storyRevision,fingerprint}})};
     }
     async function planStory(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
@@ -966,8 +985,8 @@ export function createComicService(deps: ComicDependencies) {
         if(deps.durable)return durableReference(session,id,itemId,payload,expectedRevision);
         const { data, revision } = await owned(session, id, expectedRevision);
         parse(payload, z.object({}).strict());
-        if (data.pages.length)
-            throw new ApplicationError('conflict', 'Character changes require a story revision.');
+        if (characterUsedInStory(data,itemId))
+            throw new ApplicationError('conflict', 'This character is already in the story. Changing their reference requires revising the story.');
         const character = data.characters.find(c => c.id === itemId);
         if (!character)
             throw new ApplicationError('not_found', 'Character not found.');
@@ -985,7 +1004,7 @@ export function createComicService(deps: ComicDependencies) {
             for (let attempt = 0; attempt < 3; attempt++) {
                 const latest = (await store.getOwned<Draft>(id, session));
                 const current = latest?.data.characters.find(c => c.id === character.id);
-                if (!latest || latest.data.operations?.[op] !== 'running' || latest.data.pages.length || latest.data.styleId !== data.styleId || !sameJson(current,character))
+                if (!latest || latest.data.operations?.[op] !== 'running' || characterUsedInStory(latest.data,itemId) || latest.data.styleId !== data.styleId || !sameJson(current,character))
                     throw new ApplicationError('conflict', 'Character inputs changed while rendering; the result was not applied.');
                 const { [op]: ignored, ...operations } = latest.data.operations ?? {};
                 void ignored;
@@ -1016,16 +1035,14 @@ export function createComicService(deps: ComicDependencies) {
     async function addCharacter(session: Actor, id: string, payload: unknown = {}, expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
         const body = parse(payload, characterSchema);
-        if (data.pages.length)
-            throw new ApplicationError('conflict', 'Revise the story before changing characters on planned pages.');
         const character: Character = { ...body, id: deps.id(), approved: false };
         return ({ comic: (await save(store, session, revision, { ...data, characters: [...data.characters, character] })) });
     }
     async function changeCharacter(session: Actor, id: string, itemId: string, payload: unknown = {}, method: 'PATCH' | 'DELETE' = 'PATCH', expectedRevision?: number) {
         const { data, revision } = await owned(session, id, expectedRevision);
         const body = method === 'PATCH' ? parse(payload, characterSchema) : parse(payload, z.object({}).strict());
-        if (data.pages.length)
-            throw new ApplicationError('conflict', 'Character changes require a story revision.');
+        if (characterUsedInStory(data,itemId))
+            throw new ApplicationError('conflict', 'This character is already in the story. Changing their card requires revising the story.');
         const character = data.characters.find(c => c.id === itemId);
         if (!character)
             throw new ApplicationError('not_found', 'Character not found.');
@@ -1075,7 +1092,7 @@ export function createComicService(deps: ComicDependencies) {
             const pageIndex = data.pages.findIndex(page => page.panels.some(panel => panel.id === result.earliest_affected_panel_id));
             if (pageIndex < 0)
                 throw new ApplicationError('invalid_story', 'Revision points to a missing panel.');
-            const proposal = { id: deps.id(), baseRevision: revision + 1, baseStoryRevision:data.storyRevision, result };
+            const proposal = { id: deps.id(), baseRevision: revision + 1, baseStoryRevision:data.storyRevision, result, instruction:body.instruction };
             const pendingArtworkDecision = data.pendingArtworkDecision?.panelId === body.panelId && data.pendingArtworkDecision.instruction === body.instruction ? undefined : data.pendingArtworkDecision;
             if (!(await store.update(id, session, revision, { ...data, pendingRevision: proposal, pendingArtworkDecision })))
                 throw new ApplicationError('conflict', 'Draft changed while planning the revision; refresh and try again.');
@@ -1096,7 +1113,8 @@ export function createComicService(deps: ComicDependencies) {
             if (errors.length)
                 throw new ApplicationError('invalid_story', `Revised story state needs correction: ${errors[0]}`);
             const beats = Object.fromEntries(proposal.result.revised_suffix.map(panel => [panel.id, panel.action]));
-            const updated = reviseStory(data, session, data.storyRevision, proposal.result.earliest_affected_panel_id, beats) as Draft;
+            const resolved=resolveReviews(data);
+            const updated=preservePrefixReviews(data,resolved,reviseStory(resolved,session,data.storyRevision,proposal.result.earliest_affected_panel_id,beats) as Draft,proposal.result.earliest_affected_panel_id);
             let storyReview:unknown={outcome:'pending',findings:[]};
             if(!deps.advisory) {
                 try {storyReview=await ai().narrativeJudge({creatorGoal:data.plot,answers:answeredQuestions(data),bible:storyboard.bible,beats:storyboard.pages});}
@@ -1112,7 +1130,7 @@ export function createComicService(deps: ComicDependencies) {
         });
         deps.advisory?.narrative(next);
         const firstPage = next.pages.findIndex(page => page.panels.some(panel => panel.id === proposal.result.earliest_affected_panel_id));
-        const previousPageReady = firstPage === 0 || next.pages[firstPage - 1].panels.every(p => artworkReady(next,p));
+        const previousPageReady = firstPage === 0 || next.pages[firstPage - 1].panels.every(p => reviewed(next,p));
         let pausedNotice = '';
         if (previousPageReady) {
             const pagePanels = next.pages[firstPage].panels;
@@ -1157,8 +1175,8 @@ export function createComicService(deps: ComicDependencies) {
         const pageIndex = data.pages.findIndex(p => p.id === itemId);
         if (pageIndex < 0)
             throw new ApplicationError('not_found', 'Page not found.');
-        if (pageIndex > 0 && data.pages[pageIndex - 1].panels.some(p => !artworkReady(data,p)))
-            throw new ApplicationError('conflict', 'Review and accept the preceding page first.');
+        if (pageIndex > 0 && data.pages[pageIndex - 1].panels.some(p => !reviewed(data,p)))
+            throw new ApplicationError('conflict', 'Finish and review the preceding page first.');
         const requestedPage = data.pages[pageIndex];
         let operation = data.pageOperations?.[requestedPage.id];
         if (operation && operation.storyRevision !== data.storyRevision)
@@ -1255,7 +1273,10 @@ export function createComicService(deps: ComicDependencies) {
             throw new ApplicationError('conflict', 'This panel changed since you reviewed it. Refresh and review the current image.');
         let updated: Draft;
         try {
-            updated = acceptPanelInDomain(data, session, panel.id, reviewed.assetId, reviewed.storyRevision) as Draft;
+            const resolved=resolveReviews(data),visible=resolved.pages.flatMap(page=>page.panels).find(item=>item.id===panel.id);
+            if(!visible)throw new Error('panel not found');
+            const resolvedDraft={...data,pages:data.pages.map(page=>({...page,panels:page.panels.map(item=>item.id===panel.id?visible:item)}))};
+            updated = acceptPanelInDomain(resolvedDraft, session, panel.id, reviewed.assetId, reviewed.storyRevision) as Draft;
         }
         catch {
             throw new ApplicationError('conflict', 'This panel cannot be accepted in its current state.');
@@ -1270,16 +1291,20 @@ export function createComicService(deps: ComicDependencies) {
         const updated = { ...data, title: body.title, creatorName: body.creator };
         if (!updated.pages.length || updated.pages.some(page => !page.panels.length || page.panels.some(p => !artworkReady(updated,p))))
             throw new ApplicationError('conflict', 'All current panels must be generated before publishing.');
+        const resolved=resolveReviews(updated);
+        if(resolved.pages.some(page=>page.panels.some(panel=>!reviewReady(resolved,panel))))throw new ApplicationError('conflict','Finish checking and accept the findings on every panel before publishing.');
         const pageImages = await composePages(updated);
         const pages = pageImages.map(page => ({ id: page.id, assetId: deps.id(), image: page.image }));
-        const composed = { ...updated, pages: updated.pages.map((page, i) => ({ ...page, composition: { assetId: pages[i].assetId, panelAssetIds: page.panels.map(panel => panel.assetId!) } })) };
+        const composed = { ...updated, pages: resolved.pages.map((page, i) => ({ ...page, composition: { assetId: pages[i].assetId, panelAssetIds: page.panels.map(panel => panel.assetId!) } })) };
         const editionId = deps.id();
         const validated = publishComic(composed, session, updated.storyRevision, editionId);
         if (!validated.published)
             throw new ApplicationError('conflict', 'This comic is not ready to publish.');
+        const coverAssetId=deps.id(),cover=await asset(updated.pages[0].panels[0].assetId!);
         const edition: Edition = { id, title: body.title, creator: body.creator || 'Anonymous', editionId, sourceRevision: revision + 1,
+            coverUrl:`/api/published/${encodeURIComponent(id)}/assets/${encodeURIComponent(coverAssetId)}?edition=${encodeURIComponent(editionId)}`,
             pages: pages.map(p => ({ id: p.id, imageUrl: `/api/published/${encodeURIComponent(id)}/assets/${encodeURIComponent(p.assetId)}?edition=${encodeURIComponent(editionId)}`, storage: 'sqlite' })) };
-        if (!(await store.publish(id, session, revision, edition, pages.map(p => ({ id: p.assetId, data: p.image })))))
+        if (!(await store.publish(id, session, revision, edition, [...pages.map(p => ({ id: p.assetId, data: p.image })),{id:coverAssetId,data:cover}])))
             throw new ApplicationError('conflict', 'Draft changed while publishing; refresh and try again.');
         return ({ comic: view(data, edition, revision + 1) });
     }

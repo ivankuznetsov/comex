@@ -16,7 +16,7 @@ export function ComicShell({ children }: { children: ReactNode }) {
           <Link href="/drafts" className="underline-offset-4 hover:underline">My drafts</Link>
           <Link href="/connections" className="underline-offset-4 hover:underline">Connections</Link>
           <AuthMenu />
-          <Link href="/create" className={secondaryButton}>Create a comic <span aria-hidden="true" className="ml-2">↗</span></Link>
+          <Link href="/create" className={secondaryButton}>Create a comic <span aria-hidden="true" className="ml-2">→</span></Link>
         </nav>
       </div>
     </header>

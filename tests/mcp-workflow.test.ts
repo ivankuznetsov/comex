@@ -98,11 +98,11 @@ test('a client follows the shared guided workflow through queued fake-provider o
     expect(comic.storyReview.findings[0].severity).toBe('blocker');
     await finish(await queue('comex_approve_story',{comicId,expectedRevision:comic.revision,storyRevision:comic.storyRevision,fingerprint:comic.storyApproval.fingerprint}));
     comic=await current(comicId);expect(comic.storyApproval.approved).toBe(true);expect(comic.storyReview.accepted).toBe(false);
-    expect(comic.nextActions).toContain('generate_page');expect(comic.nextActions).not.toContain('accept_story_review');
+    expect(comic.nextActions).toContain('generate_page');expect(comic.nextActions).toContain('accept_story_review');
     const generated=await finish(await queue('comex_generate_page',{comicId,pageId:comic.pages[0].id,expectedRevision:comic.revision,intent:'generate'}));
     expect(generated.data.status).toBe('succeeded');expect(images).toBe(1);
     comic=await current(comicId);const panel=comic.pages[0].panels[0];expect(panel.evaluation).toBe('blocker');expect(panel.accepted).toBe(false);expect(panel.ready).toBe(true);
-    expect(comic.nextActions).not.toContain('accept_panel');
+    expect(comic.nextSteps).toContainEqual({...panel.reviewVersion,action:'accept_panel',pageId:comic.pages[0].id,panelId:'p1',requiresConfirmation:true});
     const storyAcceptance=await finish(await queue('comex_accept_story_review',{comicId,expectedRevision:comic.revision,fingerprint:comic.storyReview.fingerprint}));
     expect(storyAcceptance.data.status).toBe('succeeded');comic=await current(comicId);expect(comic.storyReview.accepted).toBe(true);
     const panelAcceptance=await finish(await queue('comex_accept_panel',{comicId,panelId:'p1',expectedRevision:comic.revision,...panel.reviewVersion}));
@@ -113,7 +113,13 @@ test('a client follows the shared guided workflow through queued fake-provider o
     comic=await current(comicId);expect(comic.pendingArtworkDecision.choices).toEqual(['preview_story','artwork_only']);
     await finish(await queue('comex_confirm_artwork_edit',{comicId,panelId:'p1',expectedRevision:comic.revision,proposalId:comic.pendingArtworkDecision.id,decision:'artwork_only'}));
     comic=await current(comicId);expect(comic.pages[0].panels[0].accepted).toBe(false);
-    expect(comic.pages[0].panels[0].ready).toBe(true);
+    expect(comic.pages[0].panels[0].ready).toBe(true);expect(comic.pages[0].panels[0].reviewed).toBe(false);
+    const refused=await finish(await queue('comex_publish_comic',{comicId,expectedRevision:comic.revision,title:'Public courier',creator:'Mina',expectedEditionId:null}));
+    expect(refused.data.status).toBe('failed');await expect(service.getPublished(comicId)).rejects.toMatchObject({code:'not_found'});
+    const stale=await finish(await queue('comex_accept_panel',{comicId,panelId:'p1',expectedRevision:comic.revision,...panel.reviewVersion}));expect(stale.data.status).toBe('failed');
+    const currentPanel=comic.pages[0].panels[0];expect(comic.nextSteps).toContainEqual({...currentPanel.reviewVersion,action:'accept_panel',pageId:comic.pages[0].id,panelId:'p1',requiresConfirmation:true});
+    const accepted=await finish(await queue('comex_accept_panel',{comicId,panelId:'p1',expectedRevision:comic.revision,...currentPanel.reviewVersion}));expect(accepted.data.status).toBe('succeeded');
+    comic=await current(comicId);expect(comic.pages[0].panels[0].reviewed).toBe(true);
     await finish(await queue('comex_export_page',{comicId,pageId:comic.pages[0].id,expectedRevision:comic.revision}));
     await expect(service.getPublished(comicId)).rejects.toMatchObject({code:'not_found'});
     await finish(await queue('comex_publish_comic',{comicId,expectedRevision:comic.revision,title:'Public courier',creator:'Mina',expectedEditionId:null}));

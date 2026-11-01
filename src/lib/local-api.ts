@@ -9,7 +9,8 @@ import {createBudgetedFetch, BudgetError} from './budget';
 import {createComicService} from './application/comics';
 import {ApplicationError, createSchema, parse, type Draft} from './application/contracts';
 import {sameJson} from './application/json';
-import {isPanelReady, type Panel} from './domain/comic';
+import {isPanelReady, isPanelReviewed, type Panel} from './domain/comic';
+import {view as comicView} from './application/views';
 import type {PostgresAuth} from './storage/auth';
 export {validateStoryLedger} from './application/comics';
 
@@ -17,8 +18,12 @@ class HttpError extends Error { constructor(readonly status:number, message:stri
 const globalStore = globalThis as typeof globalThis & { __comexLocalStore?: LocalStore };
 const getStore = () => globalStore.__comexLocalStore ??= new LocalStore(process.env.COMEX_DB_PATH || resolve(process.cwd(), 'data/comex.sqlite'));
 function reply(data: unknown, status = 200) { return NextResponse.json(data, {status, headers: {'Cache-Control': 'no-store'}}); }
-function publicPageJob(job:PageJob|null) {
-  return job ? {id:job.id,pageId:job.pageId,state:job.state,message:job.message,createdAt:job.createdAt} : null;
+function publicPageJob(job:PageJob|null,draft?:Draft) {
+  if(!job)return null;
+  const baseline=draft?.pageOperations?.[job.pageId]?.baseline,panels=draft?.pages.find(page=>page.id===job.pageId)?.panels ?? [];
+  return {id:job.id,pageId:job.pageId,state:job.state,message:job.message,createdAt:job.createdAt,
+    completed:baseline?panels.filter(panel=>baseline[panel.id]!==undefined && panel.revision>baseline[panel.id]).length:0,
+    total:baseline?Object.keys(baseline).length:panels.length};
 }
 type BrowserAuthStore = LocalStore | PostgresAuth;
 export type BrowserBackend = {
@@ -116,24 +121,36 @@ function scheduleVisualReview(store:LocalStore,input:{draft:Draft;panelId:string
     store.putAdvisoryReview(input.draft.id,latest.owner,panelReviewKey(panel),{outcome,findings});
   })().catch(()=>{});
 }
+/** Overlay only reviews tied to the current story and image; never mutate persisted draft data. */
+function resolveAdvisory(store:LocalStore,draft:Draft):Draft {
+  const runId=(draft as Draft & {storyReviewRunId?:string}).storyReviewRunId;
+  const story=runId ? store.getAdvisoryReview(draft.id,`story:${runId}:${draft.storyRevision}`) : null;
+  const panelReviews={...draft.panelReviews},panelFindings={...draft.panelFindings};
+  const pages=draft.pages.map(page=>({...page,panels:page.panels.map(panel=>{
+    if(!panel.assetId || panel.storyRevision!==draft.storyRevision || panel.status==='outdated')return panel;
+    const review=store.getAdvisoryReview<{outcome:'pass'|'findings'|'inconclusive'|'failed';findings:{severity?:string}[]}>(draft.id,panelReviewKey(panel));
+    if(!review)return panel;
+    panelReviews[panel.id]={assetId:panel.assetId,storyRevision:panel.storyRevision,panelRevision:panel.revision,outcome:review.outcome};
+    panelFindings[panel.id]=review.findings;
+    if(panel.status!=='checking')return panel;
+    const evaluation:Panel['evaluation']=review.findings.some(f=>f.severity==='blocker')?'blocker':review.findings.some(f=>f.severity==='warning')?'warning':review.outcome==='pass'?'pass':'uncertain';
+    return {...panel,evaluation,status:evaluation==='pass'?'current' as const:'needs_review' as const};
+  })}));
+  return {...draft,...(story?{storyReview:story}:{}),pages,panelReviews,panelFindings};
+}
 function localResult<T>(result:T,store:LocalStore,owner:string,id:string):T {
   if(!result || typeof result!=='object' || !('comic' in result))return result;
   const comic=(result as {comic:any}).comic,record=store.getOwned<Draft & {storyReviewRunId?:string}>(id,owner);
   if(!comic || !record)return result;
-  const draft=record.data,story=draft.storyReviewRunId ? store.getAdvisoryReview<{outcome:string;findings:unknown[]}>(id,`story:${draft.storyReviewRunId}:${draft.storyRevision}`) : null;
-  const pages=comic.pages.map((page:any)=>({...page,panels:page.panels.map((projected:any)=>{
-    const panel=draft.pages.flatMap(item=>item.panels).find(item=>item.id===projected.id);
-    if(!panel)return projected;
-    const review=panel.assetId && panel.storyRevision===draft.storyRevision && panel.status!=='outdated' ? store.getAdvisoryReview<{outcome:string;findings:{severity?:string}[]}>(id,panelReviewKey(panel)) : null;
-    return {...projected,ready:panel.storyRevision===draft.storyRevision && isPanelReady(panel) && !draft.operations?.[`panel:${panel.id}`],...(review ? {status:panel.status==='checking'?'needs_review':projected.status,evaluation:review.findings.some(f=>f.severity==='blocker')?'blocker':review.findings.some(f=>f.severity==='warning')?'warning':projected.evaluation,reviewOutcome:review.outcome,findings:review.findings} : {})};
-  })}));
-  return {...result,comic:{...comic,activePageJob:publicPageJob(store.activePageJob(id,owner)),...(story?{storyReview:{...story,fingerprint:comic.storyReview?.fingerprint??null,accepted:false}}:{}),pages}} as T;
+  const draft=resolveAdvisory(store,record.data);
+  const projected=comicView(draft,store.getPublished(id),record.revision);
+  return {...result,comic:{...projected,activePageJob:publicPageJob(store.activePageJob(id,owner),draft)}} as T;
 }
 function serviceFor(store:LocalStore) {
   const dependencies={
     repository:store, assets:{read:asset,save:saveAsset,discard:discardAsset}, provider:createAIService, id:randomUUID,
     budgetFetch:(input:string|URL|Request,init?:RequestInit) => createBudgetedFetch(process.env.COMEX_BUDGET_DB_PATH || process.env.COMEX_DB_PATH || resolve(process.cwd(),'data/comex.sqlite'))(input,init),
-    advisory:{narrative:(draft:Draft)=>scheduleNarrativeReview(store,draft),visual:(input:Parameters<typeof scheduleVisualReview>[1])=>scheduleVisualReview(store,input)},
+    advisory:{resolve:(draft:Draft)=>resolveAdvisory(store,draft),narrative:(draft:Draft)=>scheduleNarrativeReview(store,draft),visual:(input:Parameters<typeof scheduleVisualReview>[1])=>scheduleVisualReview(store,input)},
   };
   return createComicService(dependencies);
 }
@@ -154,17 +171,19 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
         const guestToken=request.cookies.get('comex_session')?.value;
         const guest=guestToken && /^[a-f0-9]{64}$/.test(guestToken) ? await store.guestIdentity(guestToken) : null;
         const effective=identity?.owner ?? guest?.owner ?? (backend ? await owner(request,store) : null);
-        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null,...(backend ? {workspaceId:effective ? backend.workspaceId(effective) : null} : {})});
+        let signInAvailable=false;
+        try {const url=new URL(process.env.COMEX_APP_URL || '');signInAvailable=url.origin===`${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}` && !!process.env.RESEND_API_KEY && !!process.env.COMEX_EMAIL_FROM && (process.env.COMEX_AUTH_SECRET?.length??0)>=32;} catch { /* Email delivery has not been configured. */ }
+        return reply({user: identity ? {email: identity.email} : null, guest:guest ? {email:guest.email} : null,signInAvailable,...(backend ? {workspaceId:effective ? backend.workspaceId(effective) : null} : {})});
       }
       // Require Origin for these endpoints; never derive an email link from the Host header.
       const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get('host') ?? request.nextUrl.host}`;
       if (method === 'POST' && (!request.headers.get('origin') || request.headers.get('origin') !== requestOrigin)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
       if (backend && segments.length === 2 && segments[1] === 'guest' && method === 'POST') {
-        const {email:rawEmail}=await input(request,z.object({email:z.string().trim().email().max(254)}).strict());
+        const {email:rawEmail}=await input(request,z.object({email:z.string().trim().email().max(254).optional()}).strict());
         const existing=await owner(request,store);
         if (existing) return reply({ok:true,workspaceId:backend.workspaceId(existing)});
-        const at=rawEmail.lastIndexOf('@');
-        const guest=await store.createGuest(`${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}`);
+        const at=rawEmail?.lastIndexOf('@') ?? -1;
+        const guest=await store.createGuest(rawEmail ? `${rawEmail.slice(0,at)}@${rawEmail.slice(at+1).toLowerCase()}` : '');
         const response=reply({ok:true,workspaceId:backend.workspaceId(guest.owner)});
         response.cookies.set('comex_session',guest.token,{httpOnly:true,sameSite:'strict',secure:request.nextUrl.protocol==='https:',path:'/',maxAge:30*24*60*60});
         return response;
@@ -243,15 +262,17 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     if (segments[0] !== 'comics') throw new HttpError(404,'Not found.');
     if (segments.length === 1 && method === 'GET') {
       const session=await owner(request,store);
-      if (!session) throw new HttpError(401,'Sign in to see your drafts.');
+      if (!session) {
+        if(request.cookies.has('comex_session') || request.cookies.has('comex_auth'))throw new HttpError(401,'This browser session has expired.');
+        return reply({comics:[]});
+      }
       return reply(await service.list(session));
     }
     if (segments.length === 1 && method === 'POST') {
       const body=parse(await input(request,z.unknown()),createSchema);
       let session=await owner(request,store); let guestToken:string | null=null;
       if (!session) {
-        if (!body.email) throw new HttpError(401,'Enter your email to start creating.');
-        const at=body.email.lastIndexOf('@'); const email=`${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}`;
+        const at=body.email?.lastIndexOf('@') ?? -1; const email=body.email ? `${body.email.slice(0,at)}@${body.email.slice(at+1).toLowerCase()}` : '';
         const guest=await store.createGuest(email); session=guest.owner; guestToken=guest.token;
       }
       const response=reply(await service.create(session,body),201);
@@ -292,7 +313,8 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
     if (!backend && segments[2]==='pages' && segments.length===5 && segments[4]==='job' && method==='GET') {
       const requestId=request.nextUrl.searchParams.get('id') ?? undefined;
       if(requestId && !z.string().uuid().safeParse(requestId).success)throw new HttpError(400,'Invalid page job.');
-      return reply({job:publicPageJob((store as LocalStore).pageJob(id,session,segments[3],requestId)),comic:initial});
+      const local=store as LocalStore;
+      return reply({job:publicPageJob(local.pageJob(id,session,segments[3],requestId),local.getOwned<Draft>(id,session)?.data),comic:initial});
     }
     if (!backend && pageStart && method==='POST') {
       const local=store as LocalStore,asynchronous=segments[4]==='generate-async';
@@ -300,11 +322,14 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
       const requestId=asynchronous ? (payload as {requestId:string;expectedRevision:number}).requestId : randomUUID();
       const expected=asynchronous ? (payload as {requestId:string;expectedRevision:number}).expectedRevision : initial.revision;
       const previous=local.pageJob(id,session,segments[3],requestId);
-      if(previous)return reply({job:publicPageJob(previous),comic:initial},previous.state==='running'?202:200);
-      if(!initial.pages.some(page=>page.id===segments[3]))throw new HttpError(404,'Page not found.');
+      if(previous)return reply({job:publicPageJob(previous,local.getOwned<Draft>(id,session)?.data),comic:initial},previous.state==='running'?202:200);
+      const raw=local.getOwned<Draft>(id,session);if(!raw)throw new HttpError(404,'Comic not found.');
+      const draft=resolveAdvisory(local,raw.data),index=draft.pages.findIndex(page=>page.id===segments[3]);
+      if(index<0)throw new HttpError(404,'Page not found.');
+      if(index>0 && draft.pages[index-1].panels.some(panel=>panel.storyRevision!==draft.storyRevision || !isPanelReady(panel) || !!draft.operations?.[`panel:${panel.id}`] || !isPanelReviewed(panel)))throw new HttpError(409,'Finish and review the preceding page first.');
       const reservation=local.beginPageJob(id,session,segments[3],requestId,expected);
       if(!reservation)throw new HttpError(409,'The page is already drawing, needs recovery, or the draft changed. Refresh and try again.');
-      if(!reservation.created)return reply({job:publicPageJob(reservation.job),comic:initial},reservation.job.state==='running'?202:200);
+      if(!reservation.created)return reply({job:publicPageJob(reservation.job,draft),comic:initial},reservation.job.state==='running'?202:200);
       const work=async()=>{
         try {
           const result=await service.generatePage(session,id,segments[3],{},expected);
@@ -318,7 +343,7 @@ export async function handleApi(request:NextRequest,segments:string[],backend?:B
       };
       if(!asynchronous)return respond(await work());
       void work().catch(()=>{});
-      return reply({job:publicPageJob(reservation.job),comic:initial},202);
+      return reply({job:publicPageJob(reservation.job,draft),comic:initial},202);
     }
     if (segments[2] === 'pages' && segments.length === 5 && segments[4] === 'generate' && method === 'POST') return respond(await service.generatePage(session,id,segments[3],await body(),initial.revision));
     if (segments[2] === 'panels' && segments.length === 5 && segments[4] === 'edit' && method === 'POST') return respond(await service.editPanel(session,id,segments[3],await body(),initial.revision));

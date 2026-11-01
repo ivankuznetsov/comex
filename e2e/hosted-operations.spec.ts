@@ -49,7 +49,7 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     return route.fulfill({json:{id,action,comicId:'mock-comic',status:'succeeded',result:job.result}});
   });
   try {
-    await page.goto('/create');await page.getByLabel('Your email address').fill('guest@example.test');await page.getByLabel('Give your comic a title').fill('Courier');await page.getByLabel('What happens in your story?').fill(draft.plot);
+    await page.goto('/create');await page.getByLabel('Give your comic a title').fill('Courier');await page.getByLabel('What happens in your story?').fill(draft.plot);
     await page.getByRole('button',{name:'Start creating →'}).click();await expect(page).toHaveURL(/\/comics\/mock-comic/);
     await expect.poll(()=>requests.filter(item=>item.action==='initialQuestions').length).toBe(1);
     const firstQuestionKey=requests.find(item=>item.action==='initialQuestions')!.requestKey;
@@ -60,10 +60,11 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     releaseQuestions=true;
     await expect(page.getByLabel('Who receives the key?')).toBeVisible({timeout:15000});
     await expect(page.getByLabel('Who receives the key?')).toHaveAttribute('placeholder','Her brother');
-    await expect(page.getByRole('button',{name:'Review and add'})).toBeVisible({timeout:15000});
+    await expect(page.getByRole('button',{name:'Review suggestion'})).toBeVisible({timeout:15000});
     expect(new Set(requests.filter(item=>item.action==='suggestCharacters').map(item=>item.requestKey)).size).toBe(1);
     await second.close();
-    await page.getByRole('button',{name:'Review and add'}).click();await page.getByRole('button',{name:'Add character',exact:true}).click();
+    await page.getByRole('button',{name:'Review suggestion'}).click();await page.getByRole('button',{name:'Add character',exact:true}).click();
+    await page.getByRole('button',{name:'Draw reference (AI call)'}).click();
     await expect.poll(()=>requests.filter(item=>item.action==='generateReference').length).toBe(1);
     await page.reload();releaseReference=true;
     await expect(page.getByAltText('Reference for Mina')).toBeVisible({timeout:15000});
@@ -76,7 +77,7 @@ test('hosted editor restores jobs, asks the saved questions and requires each ap
     await page.getByRole('button',{name:'Approve story',exact:true}).click();await expect(page.getByText('Story approved for drawing.')).toBeVisible();
     await page.getByRole('button',{name:'Generate page',exact:true}).click();await expect(page.getByText('Check: blocker')).toBeVisible();
     expect(requests.find(item=>item.action==='generatePage')?.input.intent).toBe('generate');
-    page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Accept and continue'}).click();await expect(page.getByText('Check: blocker · Accepted')).toBeVisible();
+    page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Accept this panel'}).click();await expect(page.getByText('Check: blocker · Accepted')).toBeVisible();
     const accepted=requests.find(item=>item.action==='acceptPanel');expect(accepted?.input).toMatchObject({panelId:'panel-1',assetId:panelImage,storyRevision:1,panelRevision:2});
     await page.getByRole('button',{name:'Prepare download'}).click();const download=page.getByRole('link',{name:'Download page'});await expect(download).toHaveAttribute('href',/\/api\/operations\/op-\d+\/export/);
     await page.getByRole('button',{name:'Publish',exact:true}).click();await page.getByRole('button',{name:'Publish comic'}).click();await expect(page.getByText('Published! Your comic is now on the community shelf.')).toBeVisible();
@@ -105,7 +106,7 @@ test('a known failed redraw requires an explicit resume with a new request key',
     if(new URL(route.request().url()).pathname==='/api/operations')return route.fulfill({json:{operations:[]}});
     const first=route.request().url().endsWith('/attempt-1');draft.pages[0].generationPending=first;return route.fulfill({json:{id:first?'attempt-1':'attempt-2',action:'generatePage',comicId:'retry-comic',status:first?'failed':'succeeded',...(first?{error:'Drawing stopped safely.'}:{result:{}})}});
   });
-  await page.goto('/comics/retry-comic');await page.getByRole('button',{name:'Regenerate page',exact:true}).click();
+  await page.goto('/comics/retry-comic');page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Redraw entire page',exact:true}).click();
   await expect(page.getByRole('region',{name:'Draft operations'}).getByText(/Drawing stopped safely/)).toBeVisible();expect(sent).toHaveLength(1);expect(sent[0].input.intent).toBe('regenerate');
   await page.getByRole('button',{name:'Continue page',exact:true}).click();await expect.poll(()=>sent.length).toBe(2);
   expect(sent[1].input.intent).toBe('resume');expect(sent[1].requestKey).not.toBe(sent[0].requestKey);
@@ -147,7 +148,7 @@ test('an old failed job does not turn a completed page redraw into a resume',asy
     if(url.pathname==='/api/operations')return route.fulfill({json:{operations:[{id:'old-op',action:'generatePage',comicId:'completed-comic',pageId:'page-1',status:'failed'}]}});
     const old=url.pathname.endsWith('/old-op');return route.fulfill({json:{id:old?'old-op':'new-op',action:'generatePage',comicId:'completed-comic',status:old?'failed':'succeeded'}});
   });
-  await page.goto('/comics/completed-comic');await page.getByRole('button',{name:'Regenerate page',exact:true}).click();
+  await page.goto('/comics/completed-comic');page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Redraw entire page',exact:true}).click();
   await expect.poll(()=>sent.length).toBe(1);expect(sent[0].input.intent).toBe('regenerate');
 });
 

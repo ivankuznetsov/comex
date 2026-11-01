@@ -14,7 +14,7 @@ async function handle(request:Request):Promise<Response> {
     const allowedOrigins=mcpAllowedOrigins(app.origin,process.env.COMEX_MCP_ALLOWED_ORIGINS);
     const handler=createComexMcpHandler({
       allowedOrigins,resourceMetadata:`${app.origin}/.well-known/oauth-protected-resource/mcp`,editorOrigin:app.origin,
-      authenticate:async incoming=>{const actor=await app.auth.authenticate(incoming,[]);return actor?{actor:actor.ownerId,grantId:actor.grantId,scopes:actor.scopes}:null;},
+      authenticate:async incoming=>{const actor=await app.auth.authenticate(incoming,[]);if(actor)after(async()=>{try{await app.runtime.redeliver();}catch{/* The scheduled recovery can retry later. */}});return actor?{actor:actor.ownerId,grantId:actor.grantId,scopes:actor.scopes}:null;},
       reads:app.reads,
       operations:{kind:'durable',async enqueue(input){
         const ticket=await app.runtime.coordinator.enqueue(input);

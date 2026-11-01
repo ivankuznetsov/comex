@@ -148,7 +148,7 @@ describe('shared comic application', () => {
       expect(applied.storyReview?.accepted).toBe(false);
       expect(applied.storyReview).toMatchObject({findings:[finding]});
       expect(applied.nextActions).toContain('generate_page');
-      expect(applied.nextActions).not.toContain('accept_story_review');
+      expect(applied.nextSteps).toContainEqual({action:'accept_story_review',fingerprint:applied.storyReview!.fingerprint!,requiresConfirmation:true});
     } finally {local.close();}
   });
 
@@ -194,13 +194,19 @@ describe('shared comic application', () => {
       expect(flagged.evaluation).toBe('blocker');
       expect(flagged.findings).toHaveLength(1);
       expect(flagged.accepted).toBe(false);
-      expect(firstPage.comic.pages[0].panels.every(panel=>panel.ready)).toBe(true);
+      expect(firstPage.comic.pages[0].panels.every(panel=>panel.ready && !panel.reviewed)).toBe(true);
+      expect((await service.downloadPage(alice,id,'page1')).subarray(0,8)).toEqual(png.subarray(0,8));
+      await expect(service.generatePage(alice,id,'page2')).rejects.toMatchObject({code:'conflict'});
+      await expect(service.acceptPanel(alice,id,'p1',{...flagged.reviewVersion!,panelRevision:flagged.reviewVersion!.panelRevision+1})).rejects.toMatchObject({code:'conflict'});
+      await service.acceptPanel(alice,id,'p1',flagged.reviewVersion);
+      const second=firstPage.comic.pages[0].panels[1];await service.acceptPanel(alice,id,'p2',second.reviewVersion);
       const last=await service.generatePage(alice,id,'page2');
       expect(imageCalls).toBe(3);
-      expect(last.comic.pages[1].panels[0].ready).toBe(true);
+      const finalPanel=last.comic.pages[1].panels[0];expect(finalPanel.ready).toBe(true);expect(finalPanel.reviewed).toBe(false);
       const ready=(await service.get(alice,id)).comic;
       expect(ready.storyboard?.pages[0].panels[0].dialogue[0].text).toBe('The key');
-      expect((await service.downloadPage(alice,id,'page1')).subarray(0,8)).toEqual(png.subarray(0,8));
+      await expect(service.publish(alice,id,{title:'Public story',creator:'Mina'})).rejects.toMatchObject({code:'conflict'});
+      await service.acceptPanel(alice,id,'p3',finalPanel.reviewVersion);
       await service.publish(alice,id,{title:'Public story',creator:'Mina'});
       const edition=(await service.getPublished(id)).comic;
       expect((await service.get(alice,id)).comic.publication?.editionId).toBe(edition.editionId);

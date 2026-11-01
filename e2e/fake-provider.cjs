@@ -21,7 +21,7 @@ globalThis.fetch = async (input, init) => {
     const hold=path.join(process.env.COMEX_E2E_MAILBOX,'hold-image');
     const count=path.join(process.env.COMEX_E2E_MAILBOX,'image-count');
     fs.appendFileSync(count,'1\n');
-    const deadline=Date.now()+30_000;
+    const deadline=Date.now()+90_000;
     while (fs.existsSync(hold) && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,25));
     if (fs.existsSync(hold)) throw new Error('Timed out waiting for test image release');
     const prompt = typeof init.body === 'string' ? JSON.parse(init.body).prompt : init.body.get('prompt');

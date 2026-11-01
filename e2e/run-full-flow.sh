@@ -51,7 +51,7 @@ start_server() {
 start_server local "$qa_port" "$qa_dir/comex.sqlite" "$qa_dir/server.log"
 env -u DATABASE_URL -u VERCEL -u OP_SERVICE_ACCOUNT_TOKEN -u BLOB_READ_WRITE_TOKEN -u OPENAI_API_KEY -u RESEND_API_KEY -u NODE_OPTIONS \
   COMEX_E2E_MODE=local COMEX_E2E_FAKE_PROVIDER=1 COMEX_E2E_MAILBOX="$qa_dir/mailbox" COMEX_E2E_BUDGET_DB="$qa_dir/budget.sqlite" COMEX_DB_PATH="$qa_dir/comex.sqlite" COMEX_TEST_URL="http://127.0.0.1:$qa_port" \
-  bun run test:e2e --workers=1 --reporter=line
+  bun run test:e2e --workers=1 --reporter=line "$@"
 stop_server
 
 # These tests mock hosted APIs; they need the hosted page mode but no live backend.

@@ -1,12 +1,18 @@
 import {createHash} from 'node:crypto';
-import {isPanelReady, type ComicDraft} from '../domain/comic';
+import {isPanelReady, isPanelReviewed, type ComicDraft} from '../domain/comic';
 import type {Draft, Edition, PanelReview} from './contracts';
 import {canonicalJson} from './json';
 
 const canonicalDigest=(value:unknown)=>createHash('sha256').update(canonicalJson(value)!).digest('hex');
 const legacyJsonDigest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)!).digest('hex');
-function storyInputs(draft:Draft) {
-  const characters = draft.characters.map(({id,name,role,appearance,outfit,approved,referenceAssetId}) =>
+export function characterUsedInStory(draft:Draft,id:string):boolean {
+  return draft.pages.length>0 && (!draft.storyboard || draft.storyboard.bible.character_ids.includes(id) || draft.storyboard.pages.some(page=>page.panels.some(panel=>panel.character_ids.includes(id))));
+}
+export function reviewReady(draft:Draft,panel:ComicDraft['pages'][number]['panels'][number]):boolean {
+  return panel.storyRevision===draft.storyRevision && !draft.operations?.[`panel:${panel.id}`] && isPanelReviewed(panel);
+}
+function storyInputs(draft:Draft,allCharacters=false) {
+  const characters = draft.characters.filter(character=>allCharacters || !draft.pages.length || characterUsedInStory(draft,character.id)).map(({id,name,role,appearance,outfit,approved,referenceAssetId}) =>
     ({id,name,role,appearance,outfit,approved,referenceAssetId:referenceAssetId ?? null}));
   return {storyRevision:draft.storyRevision,plot:draft.plot,style:draft.styleId,answers:draft.answers,characters,storyboard:draft.storyboard};
 }
@@ -20,7 +26,7 @@ export function storyFingerprint(draft: Draft): string | null {
 export function isStoryApproved(draft: Draft): boolean {
   const fingerprint = storyFingerprint(draft);
   return !!fingerprint && draft.storyApproval?.storyRevision === draft.storyRevision &&
-    (draft.storyApproval.fingerprint === fingerprint || draft.storyApproval.fingerprint === legacyJsonDigest(storyInputs(draft)));
+    (draft.storyApproval.fingerprint === fingerprint || draft.storyApproval.fingerprint === legacyJsonDigest(storyInputs(draft)) || draft.storyApproval.fingerprint === canonicalDigest(storyInputs(draft,true)) || draft.storyApproval.fingerprint === legacyJsonDigest(storyInputs(draft,true)));
 }
 export function narrativeFingerprint(draft: Draft): string | null {
   if (!draft.storyboard || !draft.storyReview || typeof draft.storyReview !== 'object') return null;
@@ -51,10 +57,12 @@ export function revisionPreview(draft: Draft, revision: number) {
     if(page<0 || index<0 || !previous)return [];
     return [{id:panel.id,page:page+1,panel:index+1,previousAction:previous.action,action:panel.action,dialogue:panel.dialogue.map(line=>({speaker:draft.characters.find(character=>character.id===line.speaker_id)?.name ?? line.speaker_id,text:line.text}))}];
   });
-  return {id:proposal.id,baseRevision:proposal.baseRevision,baseStoryRevision:proposal.baseStoryRevision ?? draft.storyRevision,
+  let explanation=proposal.result.explanation;
+  for(const [pageIndex,page] of draft.pages.entries())for(const [panelIndex,panel] of page.panels.entries())explanation=explanation.split(panel.id).join(`page ${pageIndex+1}, panel ${panelIndex+1}`);
+  return {id:proposal.id,instruction:proposal.instruction ?? '',baseRevision:proposal.baseRevision,baseStoryRevision:proposal.baseStoryRevision ?? draft.storyRevision,
     current:proposal.baseRevision === revision && !!draft.storyboard && pageIndex >= 0,
     earliestPanelId:proposal.result.earliest_affected_panel_id,affectedPage:pageIndex + 1,affectedPageId:draft.pages[pageIndex]?.id ?? null,affectedPanel:panelIndex + 1,
-    explanation:proposal.result.explanation,panels,revisedBible:proposal.result.revised_bible,revisedSuffix:proposal.result.revised_suffix,storyboard};
+    explanation,panels,revisedBible:proposal.result.revised_bible,revisedSuffix:proposal.result.revised_suffix,storyboard};
 }
 function reviewOutcome(draft: Draft, panel: ComicDraft['pages'][number]['panels'][number]): PanelReview['outcome'] | null {
   const review = draft.panelReviews?.[panel.id];
@@ -90,14 +98,22 @@ export function view(draft: Draft, published: Edition | null, revision: number) 
     }
     if (draft.characters.length && draft.characters.every(character => character.approved && character.referenceAssetId && !draft.operations?.[`character:${character.id}`]) && !['running','unknown'].includes(draft.initialQuestions ?? '') && !['running','unknown'].includes(draft.initialSuggestions ?? '')) nextSteps.push({action:'plan_story'});
   } else {
-    if (!approved && fingerprint && draft.characters.every(character => character.approved && character.referenceAssetId)) nextSteps.push({action:'approve_story',revision,storyRevision:draft.storyRevision,fingerprint});
+    nextSteps.push({action:'add_character'});
+    for(const character of draft.characters) {
+      if(characterUsedInStory(draft,character.id) || draft.operations?.[`character:${character.id}`])continue;
+      if(!character.referenceAssetId)nextSteps.push({action:'generate_reference',characterId:character.id});
+      else if(!character.approved && character.referenceUrl)nextSteps.push({action:'approve_reference',characterId:character.id,assetId:character.referenceAssetId});
+    }
+    if (!approved && fingerprint && draft.characters.every(character => !characterUsedInStory(draft,character.id) || (character.approved && character.referenceAssetId))) nextSteps.push({action:'approve_story',revision,storyRevision:draft.storyRevision,fingerprint});
+    if (hasNarrativeBlocker(draft) && reviewFingerprint) nextSteps.push({action:'accept_story_review',fingerprint:reviewFingerprint,requiresConfirmation:true});
     if (draft.storyboard) nextSteps.push({action:'preview_revision'});
     if (revisionDecision?.current) nextSteps.push({action:'apply_revision',proposalId:revisionDecision.id,requiresConfirmation:true});
     if (artworkDecision?.current && approved && artworkDecision.intent === 'uncertain') nextSteps.push({action:'choose_artwork_only',panelId:artworkDecision.panelId,proposalId:artworkDecision.id,requiresConfirmation:true});
+    for(const page of draft.pages)for(const panel of page.panels)if(panel.assetId && panel.storyRevision===draft.storyRevision && panel.status==='needs_review' && !reviewReady(draft,panel))nextSteps.push({action:'accept_panel',pageId:page.id,panelId:panel.id,assetId:panel.assetId,storyRevision:panel.storyRevision,panelRevision:panel.revision,requiresConfirmation:panel.evaluation==='blocker'});
     if (approved) {
       const referencesReady = !!draft.storyboard && draft.storyboard.pages.every(page => page.panels.every(panel => panel.character_ids.every(id => draft.characters.some(character => character.id === id && character.approved && character.referenceAssetId))));
       if (referencesReady) for (const [index,page] of draft.pages.entries()) {
-        const previousReady = index === 0 || draft.pages[index-1].panels.every(panel => panel.storyRevision === draft.storyRevision && isPanelReady(panel) && !draft.operations?.[`panel:${panel.id}`]);
+        const previousReady = index === 0 || draft.pages[index-1].panels.every(panel => reviewReady(draft,panel));
         const blockedPanel = page.panels.some(panel => !!draft.operations?.[`panel:${panel.id}`]);
         if (previousReady && !blockedPanel) nextSteps.push({action:'generate_page',pageId:page.id});
       }
@@ -106,12 +122,12 @@ export function view(draft: Draft, published: Edition | null, revision: number) 
   return {
     id: draft.id, title: draft.title, plot: draft.plot, style: draft.styleId, revision, storyRevision:draft.storyRevision,
     panelsPerPage:draft.panelsPerPage ?? 3, pageLayout:draft.pageLayout ?? 'stack',
-    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:isNarrativeAccepted(draft)} : null,
+    characters: draft.characters.map(({referenceAssetId, ...character}) => ({...character,lockedByStory:characterUsedInStory(draft,character.id),referenceVersion:referenceAssetId ?? null,referenceStatus:draft.operations?.[`character:${character.id}`] ?? (referenceAssetId ? 'ready' : 'missing')})), characterSuggestions:draft.characterSuggestions ?? [], initialSuggestions:draft.initialSuggestions ?? 'idle', questions: draft.questions, initialQuestions:draft.initialQuestions ?? (draft.questions.length ? 'complete' : 'failed'), answers: draft.answers, storyReview: draft.storyReview && typeof draft.storyReview === 'object' ? {...draft.storyReview, fingerprint:reviewFingerprint, accepted:isNarrativeAccepted(draft)} : null,
     storyboard:draft.storyboard ?? null, storyApproval:fingerprint ? {storyRevision:draft.storyRevision,fingerprint,approved} : null,
     pendingRevision:revisionDecision, pendingArtworkDecision:artworkDecision, nextSteps, nextActions:[...new Set(nextSteps.map(step => step.action))],
     pages: draft.pages.map((page, i) => ({id: page.id, index: i + 1, generationPending:draft.pageOperations?.[page.id]?.storyRevision === draft.storyRevision,
-      status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => p.storyRevision === draft.storyRevision && isPanelReady(p) && !draft.operations?.[`panel:${p.id}`]) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
-      panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, reviewOutcome:reviewOutcome(draft,p), findings: reviewOutcome(draft,p) ? draft.panelFindings?.[p.id] ?? [] : [], ready: p.storyRevision === draft.storyRevision && isPanelReady(p) && !draft.operations?.[`panel:${p.id}`], accepted: !!p.acceptance && p.acceptance.assetId === p.assetId && p.acceptance.storyRevision === p.storyRevision && p.acceptance.panelRevision === p.revision, imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null}))})),
+      status: page.panels.some(p => p.status === 'outdated') ? 'outdated' : page.panels.every(p => reviewReady(draft,p)) ? 'current' : page.panels.some(p => p.status === 'checking') ? 'checking' : page.panels.some(p => p.status === 'needs_review') ? 'needs_review' : 'planned',
+      panels: page.panels.map(p => ({id: p.id, description: p.beat, status: p.status, evaluation: p.evaluation, reviewOutcome:reviewOutcome(draft,p), findings: reviewOutcome(draft,p) ? draft.panelFindings?.[p.id] ?? [] : [], ready: p.storyRevision === draft.storyRevision && isPanelReady(p) && !draft.operations?.[`panel:${p.id}`], reviewed:reviewReady(draft,p), accepted: !!p.acceptance && p.acceptance.assetId === p.assetId && p.acceptance.storyRevision === p.storyRevision && p.acceptance.panelRevision === p.revision, imageUrl: p.assetId ? `/api/comics/${encodeURIComponent(draft.id)}/assets/${encodeURIComponent(p.assetId)}` : null, reviewVersion: p.assetId ? {assetId:p.assetId, storyRevision:p.storyRevision, panelRevision:p.revision} : null}))})),
     published: !!published, publication: published ? {editionId:published.editionId,title:published.title, creator:published.creator} : null,
     unpublishedChanges: !!published && published.sourceRevision !== revision,
   };
